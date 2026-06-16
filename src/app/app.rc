@@ -1,0 +1,9 @@
+// OhMyDisplay main app resources
+#include <windows.h>
+#include "resource.h"
+
+// RT_MANIFEST id 1 embeds the application manifest into the exe.
+1 RT_MANIFEST "OhMyDisplay.manifest"
+
+// Tray/window icon. A generated placeholder icon ships in assets.
+IDI_APP_ICON ICON "..\\..\\assets\\app.ico"

@@ -1,0 +1,5 @@
+// OhMyDisplay elevated helper resources
+#include <windows.h>
+
+// RT_MANIFEST id 1 embeds the requireAdministrator manifest.
+1 RT_MANIFEST "helper_manifest.xml"

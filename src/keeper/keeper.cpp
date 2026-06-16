@@ -1,0 +1,215 @@
+// OhMyDisplay - Layout Keeper orchestrator implementation.
+#include "keeper/keeper.h"
+#include "keeper/window_capture.h"
+#include "keeper/monitor_labels.h"
+#include "keeper/restore_engine.h"
+#include "core/logger.h"
+
+#include <windows.h>
+
+namespace omd
+{
+    Keeper::Keeper(Settings& settings) : settings_(settings)
+    {
+    }
+
+    Keeper::~Keeper()
+    {
+        Shutdown();
+    }
+
+    bool Keeper::Init()
+    {
+        store_.Load();
+        debouncer_ = std::make_unique<Debouncer>([this]
+        {
+            EvaluateAndRestore();
+        });
+        debouncer_->SetConfig(settings_.keeper.debounce);
+        debouncer_->Start();
+        OMD_LOGI("keeper: init (enabled=%d, topologies=%zu)",
+                 settings_.keeper.enabled ? 1 : 0, store_.Topologies().size());
+        return true;
+    }
+
+    void Keeper::Shutdown()
+    {
+        if (debouncer_)
+        {
+            debouncer_->Stop();
+            debouncer_.reset();
+        }
+    }
+
+    void Keeper::OnTopologyEvent()
+    {
+        if (!settings_.keeper.enabled || !debouncer_)
+        {
+            return;
+        }
+        // Active monitor count drives the adaptive window; cheap to read here.
+        int count = GetSystemMetrics(SM_CMONITORS);
+        if (count < 1)
+        {
+            count = 1;
+        }
+        debouncer_->SetConfig(settings_.keeper.debounce);
+        debouncer_->Trigger(count);
+    }
+
+    Topology Keeper::CurrentResolvedTopology()
+    {
+        Topology topo;
+        if (QueryActiveTopology(topo))
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ResolveIdentities(topo, store_.Labels());
+        }
+        return topo;
+    }
+
+    std::vector<GhostMonitor> Keeper::Ghosts()
+    {
+        return DetectGhostMonitors();
+    }
+
+    void Keeper::SetMonitorLabel(const std::string& identity, const std::string& label)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            store_.Labels().SetLabel(identity, label);
+            store_.Save();
+        }
+        OMD_LOGI("keeper: label set id=%s label=%s", identity.c_str(), label.c_str());
+    }
+
+    void Keeper::SaveNow()
+    {
+        Topology topo;
+        if (!QueryActiveTopology(topo))
+        {
+            OMD_LOGE("keeper: SaveNow topology query failed");
+            return;
+        }
+        std::vector<WindowSnap> wins;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ResolveIdentities(topo, store_.Labels());
+            wins = CaptureWindows(topo, settings_.keeper);
+            store_.Upsert(topo, wins);
+            store_.Save();
+        }
+        if (onNotify)
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "Saved %zu windows for %d-monitor layout",
+                          wins.size(), topo.Count());
+            onNotify(buf);
+        }
+    }
+
+    void Keeper::RestoreNow()
+    {
+        Topology topo;
+        if (!QueryActiveTopology(topo))
+        {
+            OMD_LOGE("keeper: RestoreNow topology query failed");
+            return;
+        }
+        StoredTopology snapCopy;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ResolveIdentities(topo, store_.Labels());
+            const StoredTopology* st = store_.FindBySignature(topo.signature);
+            if (st != nullptr)
+            {
+                snapCopy = *st; // copy so we can restore without holding the lock
+                found = true;
+            }
+        }
+        if (!found)
+        {
+            if (onNotify)
+            {
+                onNotify("No saved layout for the current displays yet");
+            }
+            return;
+        }
+        RestoreEngine engine(settings_.keeper);
+        RestoreResult res = engine.Restore(snapCopy, topo);
+        if (onNotify)
+        {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "Restored %d/%d windows (%d retried, %d skipped)",
+                          res.restored, res.total, res.retried, res.skipped);
+            onNotify(buf);
+        }
+    }
+
+    void Keeper::EvaluateAndRestore()
+    {
+        if (!settings_.keeper.enabled)
+        {
+            return;
+        }
+        Topology topo;
+        if (!QueryActiveTopology(topo))
+        {
+            return;
+        }
+
+        bool collision = false;
+        StoredTopology snapCopy;
+        bool found = false;
+        bool autoSaved = false;
+        size_t savedCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            collision = ResolveIdentities(topo, store_.Labels());
+            const StoredTopology* st = store_.FindBySignature(topo.signature);
+            if (st != nullptr)
+            {
+                snapCopy = *st;
+                found = true;
+            }
+            else
+            {
+                // Unknown topology: capture and store so future collapses can restore.
+                std::vector<WindowSnap> wins = CaptureWindows(topo, settings_.keeper);
+                savedCount = wins.size();
+                store_.Upsert(topo, wins);
+                store_.Save();
+                autoSaved = true;
+            }
+        }
+
+        if (collision && onCollision)
+        {
+            onCollision("Two identical monitors detected. Please label them to tell them apart.");
+        }
+
+        if (autoSaved)
+        {
+            OMD_LOGI("keeper: new topology auto-saved (%zu windows)", savedCount);
+            if (onNotify)
+            {
+                onNotify("New display layout detected and saved");
+            }
+            return;
+        }
+
+        if (found)
+        {
+            RestoreEngine engine(settings_.keeper);
+            RestoreResult res = engine.Restore(snapCopy, topo);
+            if (onNotify && (res.restored > 0 || res.retried > 0))
+            {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "Layout restored: %d/%d windows",
+                              res.restored, res.total);
+                onNotify(buf);
+            }
+        }
+    }
+}

@@ -1,0 +1,27 @@
+# Build output
+/build/
+/out/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.res
+
+# Fetched build-time dependency (restore with scripts/fetch-webview2.ps1)
+/third_party/webview2/
+
+# Visual Studio / CMake local files
+.vs/
+*.user
+CMakeSettings.json
+CMakeUserPresets.json
+
+# OS / editor cruft
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+
+# Runtime data (should never be in the tree, but guard anyway)
+*.log

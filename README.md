@@ -1,5 +1,7 @@
 # OhMyDisplay
 
+[![CI](https://github.com/kernullist/OhMyDisplay/actions/workflows/ci.yml/badge.svg)](https://github.com/kernullist/OhMyDisplay/actions/workflows/ci.yml)
+
 Windows tray utility that solves two chronic display/power annoyances with one tool:
 
 1. **Layout Keeper** - auto-saves window layouts per display topology and restores them

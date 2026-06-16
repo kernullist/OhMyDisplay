@@ -49,6 +49,13 @@ Artifacts land in `build\`:
 - `OhMyDisplay.Elevated.exe` - elevation helper (requireAdministrator)
 - `omd_tests.exe` - test harness
 
+### Releases
+
+Pushing a `v*` tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`) runs the release
+workflow: it builds Release, runs the tests, and publishes a GitHub Release with the two
+exes plus a zipped bundle. Release binaries are currently unsigned (Authenticode signing is
+a planned hardening item, so SmartScreen will warn on first run).
+
 ## Usage
 
 Run `OhMyDisplay.exe`. It lives in the tray. Right-click the icon for:

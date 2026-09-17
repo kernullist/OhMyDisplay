@@ -36,4 +36,8 @@ namespace omd
     // and recompute the topology signature. Returns true if a same-model collision was
     // detected (the shell should offer the label UI).
     bool ResolveIdentities(Topology& topo, const MonitorLabels& labels);
+
+    // True when at least one same-model group still has an empty user label.
+    // Used so we do not pop the label editor on every topology burst.
+    bool HasUnlabeledCollision(const Topology& topo);
 }

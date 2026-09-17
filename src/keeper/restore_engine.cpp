@@ -15,6 +15,13 @@ namespace omd
             return -1;
         }
         int score = 1; // same exe baseline
+        // Same HWND in this session (survives monitor sleep) is the strongest signal.
+        // Also require pid: HWND values are recycled after the original window dies.
+        if (snap.hwnd != nullptr && snap.hwnd == live.hwnd &&
+            snap.pid != 0 && snap.pid == live.pid)
+        {
+            score += 1000;
+        }
         if (!snap.className.empty() && snap.className == live.className)
         {
             score += 50;
@@ -32,6 +39,105 @@ namespace omd
             }
         }
         return score;
+    }
+
+    std::vector<int> AssignRestoreMatches(const std::vector<WindowSnap>& snaps,
+                                          const std::vector<LiveWindow>& live)
+    {
+        struct Pair
+        {
+            int snapIndex;
+            int liveIndex;
+            int score;
+        };
+        std::vector<Pair> pairs;
+        for (size_t si = 0; si < snaps.size(); ++si)
+        {
+            for (size_t li = 0; li < live.size(); ++li)
+            {
+                int s = WindowMatchScore(snaps[si], live[li]);
+                if (s > 0)
+                {
+                    pairs.push_back(Pair{static_cast<int>(si), static_cast<int>(li), s});
+                }
+            }
+        }
+        std::sort(pairs.begin(), pairs.end(),
+                  [](const Pair& a, const Pair& b)
+                  {
+                      if (a.score != b.score)
+                      {
+                          return a.score > b.score;
+                      }
+                      return a.snapIndex < b.snapIndex;
+                  });
+
+        std::vector<int> assigned(snaps.size(), -1);
+        std::vector<char> liveUsed(live.size(), 0);
+        for (const auto& p : pairs)
+        {
+            if (assigned[static_cast<size_t>(p.snapIndex)] >= 0)
+            {
+                continue;
+            }
+            if (liveUsed[static_cast<size_t>(p.liveIndex)] != 0)
+            {
+                continue;
+            }
+            assigned[static_cast<size_t>(p.snapIndex)] = p.liveIndex;
+            liveUsed[static_cast<size_t>(p.liveIndex)] = 1;
+        }
+        return assigned;
+    }
+
+    bool LayoutLooksCollapsed(const std::vector<WindowSnap>& saved,
+                              const std::vector<WindowSnap>& current)
+    {
+        bool collapsed = false;
+        do
+        {
+            if (saved.empty() || current.empty())
+            {
+                break;
+            }
+            std::vector<LiveWindow> live;
+            live.reserve(current.size());
+            for (const auto& c : current)
+            {
+                LiveWindow lw;
+                lw.hwnd = c.hwnd;
+                lw.pid = c.pid;
+                lw.exeLeaf = c.exeLeaf;
+                lw.title = c.title;
+                lw.className = c.className;
+                live.push_back(std::move(lw));
+            }
+            std::vector<int> match = AssignRestoreMatches(saved, live);
+            int matched = 0;
+            int wrong = 0;
+            for (size_t i = 0; i < saved.size(); ++i)
+            {
+                int li = match[i];
+                if (li < 0)
+                {
+                    continue;
+                }
+                ++matched;
+                const std::string& want = saved[i].monitorId;
+                const std::string& got = current[static_cast<size_t>(li)].monitorId;
+                if (!want.empty() && !got.empty() && want != got)
+                {
+                    ++wrong;
+                }
+            }
+            if (matched <= 0)
+            {
+                break;
+            }
+            // At least half the matched windows fled to a different monitor.
+            collapsed = (wrong * 2 >= matched);
+        } while (false);
+        return collapsed;
     }
 
     namespace
@@ -74,7 +180,6 @@ namespace omd
 
         std::vector<LiveWindow> live = EnumerateLiveWindows(cfg_);
 
-        // First pass: greedy best-match assignment.
         struct Pending
         {
             const WindowSnap* snap;
@@ -82,33 +187,22 @@ namespace omd
         };
         std::vector<Pending> pending;
 
-        for (const auto& w : snap.windows)
+        // Highest-score unique assignment so a weak first snap cannot steal a better match.
+        std::vector<int> assigned = AssignRestoreMatches(snap.windows, live);
+        for (size_t i = 0; i < snap.windows.size(); ++i)
         {
-            int bestScore = 0;
-            int bestIdx = -1;
-            for (size_t i = 0; i < live.size(); ++i)
-            {
-                if (live[i].used)
-                {
-                    continue;
-                }
-                int s = WindowMatchScore(w, live[i]);
-                if (s > bestScore)
-                {
-                    bestScore = s;
-                    bestIdx = static_cast<int>(i);
-                }
-            }
-            if (bestIdx < 0)
+            int idx = assigned[i];
+            if (idx < 0)
             {
                 res.skipped++;
-                OMD_LOGD("restore: no live match for %s '%s'", w.exeLeaf.c_str(), w.title.c_str());
+                OMD_LOGD("restore: no live match for %s '%s'",
+                         snap.windows[i].exeLeaf.c_str(), snap.windows[i].title.c_str());
                 continue;
             }
-            live[static_cast<size_t>(bestIdx)].used = true;
-            if (ApplyPlacement(live[static_cast<size_t>(bestIdx)].hwnd, w, topo))
+            HWND hwnd = live[static_cast<size_t>(idx)].hwnd;
+            if (ApplyPlacement(hwnd, snap.windows[i], topo))
             {
-                pending.push_back(Pending{&w, live[static_cast<size_t>(bestIdx)].hwnd});
+                pending.push_back(Pending{&snap.windows[i], hwnd});
             }
             else
             {
@@ -116,34 +210,50 @@ namespace omd
             }
         }
 
-        // Verification + retry passes for windows that fought back.
+        // One shared settle wait, then retry only the windows that did not land.
         int retries = cfg_.restoreRetries;
-        for (auto& p : pending)
+        if (retries < 0)
         {
-            bool good = false;
-            for (int attempt = 0; attempt <= retries; ++attempt)
+            retries = 0;
+        }
+        if (!pending.empty())
+        {
+            Sleep(200);
+        }
+        for (int attempt = 0; attempt <= retries; ++attempt)
+        {
+            std::vector<Pending> failed;
+            for (const auto& p : pending)
             {
-                Sleep(200);
                 if (VerifyPlacement(p.hwnd, *p.snap, topo))
                 {
-                    good = true;
-                    break;
+                    res.restored++;
                 }
-                if (attempt < retries)
+                else
                 {
-                    res.retried++;
-                    ApplyPlacement(p.hwnd, *p.snap, topo);
+                    failed.push_back(p);
                 }
             }
-            if (good)
+            if (failed.empty())
             {
-                res.restored++;
+                break;
             }
-            else
+            if (attempt == retries)
             {
-                res.skipped++;
-                OMD_LOGW("restore: gave up on %s '%s'", p.snap->exeLeaf.c_str(), p.snap->title.c_str());
+                res.skipped += static_cast<int>(failed.size());
+                for (const auto& p : failed)
+                {
+                    OMD_LOGW("restore: gave up on %s '%s'", p.snap->exeLeaf.c_str(), p.snap->title.c_str());
+                }
+                break;
             }
+            res.retried += static_cast<int>(failed.size());
+            for (const auto& p : failed)
+            {
+                ApplyPlacement(p.hwnd, *p.snap, topo);
+            }
+            pending = std::move(failed);
+            Sleep(200);
         }
 
         OMD_LOGI("restore: total=%d restored=%d skipped=%d retried=%d",

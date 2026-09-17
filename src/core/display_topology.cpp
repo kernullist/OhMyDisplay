@@ -135,6 +135,57 @@ namespace omd
         return HashHex(joined);
     }
 
+    bool QueryDisplayConfigRetry(UINT32 flags,
+                                 std::vector<DISPLAYCONFIG_PATH_INFO>& paths,
+                                 std::vector<DISPLAYCONFIG_MODE_INFO>& modes)
+    {
+        bool ok = false;
+        do
+        {
+            for (int attempt = 0; attempt < 8; ++attempt)
+            {
+                UINT32 numPaths = 0;
+                UINT32 numModes = 0;
+                LONG rc = GetDisplayConfigBufferSizes(flags, &numPaths, &numModes);
+                if (rc != ERROR_SUCCESS)
+                {
+                    Sleep(40);
+                    continue;
+                }
+                if (numPaths == 0)
+                {
+                    paths.clear();
+                    modes.clear();
+                    ok = true;
+                    break;
+                }
+                if (numPaths > 4096 || numModes > 16384)
+                {
+                    OMD_LOGE("ccd: implausible buffer sizes paths=%u modes=%u", numPaths, numModes);
+                    break;
+                }
+                paths.resize(numPaths);
+                modes.resize(numModes);
+                rc = QueryDisplayConfig(flags, &numPaths, paths.data(),
+                                        &numModes, modes.data(), nullptr);
+                if (rc == ERROR_SUCCESS)
+                {
+                    paths.resize(numPaths);
+                    modes.resize(numModes);
+                    ok = true;
+                    break;
+                }
+                if (rc != ERROR_INSUFFICIENT_BUFFER && rc != ERROR_GEN_FAILURE)
+                {
+                    OMD_LOGE("ccd: QueryDisplayConfig failed rc=%ld", rc);
+                    break;
+                }
+                Sleep(40);
+            }
+        } while (false);
+        return ok;
+    }
+
     bool QueryActiveTopology(Topology& out)
     {
         out.monitors.clear();
@@ -143,24 +194,13 @@ namespace omd
         bool ok = false;
         do
         {
-            UINT32 numPaths = 0;
-            UINT32 numModes = 0;
-            LONG rc = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &numPaths, &numModes);
-            if (rc != ERROR_SUCCESS)
+            std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+            std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+            if (!QueryDisplayConfigRetry(QDC_ONLY_ACTIVE_PATHS, paths, modes))
             {
-                OMD_LOGE("ccd: GetDisplayConfigBufferSizes failed rc=%ld", rc);
+                OMD_LOGE("ccd: QueryDisplayConfigRetry failed");
                 break;
             }
-            std::vector<DISPLAYCONFIG_PATH_INFO> paths(numPaths);
-            std::vector<DISPLAYCONFIG_MODE_INFO> modes(numModes);
-            rc = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &numPaths, paths.data(),
-                                    &numModes, modes.data(), nullptr);
-            if (rc != ERROR_SUCCESS)
-            {
-                OMD_LOGE("ccd: QueryDisplayConfig failed rc=%ld", rc);
-                break;
-            }
-            paths.resize(numPaths);
 
             // Map GDI device name -> per-path target identity fields.
             struct TargetData

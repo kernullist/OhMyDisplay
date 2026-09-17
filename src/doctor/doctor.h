@@ -9,6 +9,10 @@
 
 namespace omd
 {
+    // Safe, reversible action used by both the Doctor facade and the report window.
+    // Prompts UAC via the elevated helper. Does not require a Doctor instance.
+    bool ApplyDeviceDisableWake(const std::string& deviceName);
+
     class Doctor
     {
     public:

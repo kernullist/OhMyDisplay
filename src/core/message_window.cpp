@@ -4,9 +4,9 @@
 
 namespace omd
 {
-    namespace
+    const wchar_t* MessageWindow::ClassName()
     {
-        const wchar_t* kClassName = L"OhMyDisplay.MessageHub";
+        return L"OhMyDisplay.MessageHub";
     }
 
     MessageWindow::~MessageWindow()
@@ -31,7 +31,7 @@ namespace omd
             wc.cbSize = sizeof(wc);
             wc.lpfnWndProc = &MessageWindow::WndProc;
             wc.hInstance = hInst;
-            wc.lpszClassName = kClassName;
+            wc.lpszClassName = ClassName();
             if (RegisterClassExW(&wc) == 0)
             {
                 if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
@@ -43,7 +43,7 @@ namespace omd
             classRegistered_ = true;
 
             // Create a normal but hidden top-level window so it receives broadcasts.
-            hwnd_ = CreateWindowExW(0, kClassName, L"OhMyDisplay", WS_OVERLAPPED,
+            hwnd_ = CreateWindowExW(0, ClassName(), L"OhMyDisplay", WS_OVERLAPPED,
                                     0, 0, 0, 0, nullptr, nullptr, hInst, this);
             if (hwnd_ == nullptr)
             {
@@ -64,7 +64,7 @@ namespace omd
         }
         if (classRegistered_)
         {
-            UnregisterClassW(kClassName, GetModuleHandleW(nullptr));
+            UnregisterClassW(ClassName(), GetModuleHandleW(nullptr));
             classRegistered_ = false;
         }
     }

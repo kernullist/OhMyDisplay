@@ -50,6 +50,12 @@ namespace omd
         const MonitorInfo* FindByGdiName(const std::string& gdi) const;
     };
 
+    // QueryDisplayConfig with a short retry on ERROR_INSUFFICIENT_BUFFER /
+    // ERROR_GEN_FAILURE, which are common while monitors are hot-plugging.
+    bool QueryDisplayConfigRetry(UINT32 flags,
+                                 std::vector<DISPLAYCONFIG_PATH_INFO>& paths,
+                                 std::vector<DISPLAYCONFIG_MODE_INFO>& modes);
+
     // Query the current active topology. Returns false only on hard CCD failure.
     bool QueryActiveTopology(Topology& out);
 

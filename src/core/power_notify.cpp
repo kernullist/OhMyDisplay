@@ -72,6 +72,21 @@ namespace omd
                                     bus_->Post(CoreEvent::DisplayStateOn);
                                 }
                             }
+                            else if (IsEqualGUID(setting->PowerSetting, kGuidMonitorPowerOn))
+                            {
+                                // 0 = off, 1 = on. Complements GUID_CONSOLE_DISPLAY_STATE
+                                // on machines that only fire the legacy monitor-power GUID.
+                                if (state == 0)
+                                {
+                                    OMD_LOGI("power: monitor power off");
+                                    bus_->Post(CoreEvent::DisplayStateOff);
+                                }
+                                else if (state == 1)
+                                {
+                                    OMD_LOGI("power: monitor power on");
+                                    bus_->Post(CoreEvent::DisplayStateOn);
+                                }
+                            }
                         }
                         break;
                     }

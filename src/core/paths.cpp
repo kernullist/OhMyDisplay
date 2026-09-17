@@ -112,9 +112,9 @@ namespace omd
         std::wstring result;
         do
         {
-            wchar_t buf[MAX_PATH];
-            DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-            if (n == 0 || n >= MAX_PATH)
+            wchar_t buf[32768];
+            DWORD n = GetModuleFileNameW(nullptr, buf, ARRAYSIZE(buf));
+            if (n == 0 || n >= ARRAYSIZE(buf))
             {
                 break;
             }

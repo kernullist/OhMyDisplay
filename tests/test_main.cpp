@@ -10,6 +10,7 @@
 #include "core/settings.h"
 #include "core/logger.h"
 #include "core/elevated_ipc.h"
+#include "core/process_util.h"
 #include "doctor/powercfg_collector.h"
 #include "doctor/doctor.h"
 #include "doctor/report.h"
@@ -165,6 +166,27 @@ static void TestSameModelCollision()
         }
     }
     CHECK(labelApplied, "user label binds to resolved identity");
+
+    Topology unlabeled = topo;
+    for (auto& m : unlabeled.monitors)
+    {
+        m.label.clear();
+    }
+    CHECK(HasUnlabeledCollision(unlabeled), "collision without labels needs a prompt");
+
+    labels.SetLabel(topo.monitors[0].id, "Left 27");
+    labels.SetLabel(topo.monitors[1].id, "Right 27");
+    Topology bothLabeled;
+    bothLabeled.monitors = {m1, m2};
+    ResolveIdentities(bothLabeled, labels);
+    CHECK(!HasUnlabeledCollision(bothLabeled), "fully labeled collision should not prompt");
+
+    Topology unique;
+    MonitorInfo only = m1;
+    only.baseId = "m_solo";
+    only.id = "m_solo";
+    unique.monitors = {only};
+    CHECK(!HasUnlabeledCollision(unique), "single monitor is not a collision");
 }
 
 static void TestCoordRoundTrip()
@@ -216,6 +238,93 @@ static void TestMatchScore()
     CHECK(sWrong < 0, "different exe is ineligible");
     CHECK(sExact > sClass, "exact title+class beats class-only");
     CHECK(sClass > 0, "same exe+class is eligible");
+
+    LiveWindow sameHwnd;
+    sameHwnd.exeLeaf = "code.exe";
+    sameHwnd.className = "Chrome_WidgetWin_1";
+    sameHwnd.title = "other.txt - VS Code";
+    sameHwnd.hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1234));
+    sameHwnd.pid = 4242;
+    WindowSnap snapHwnd = snap;
+    snapHwnd.hwnd = sameHwnd.hwnd;
+    snapHwnd.pid = 4242;
+    CHECK(WindowMatchScore(snapHwnd, sameHwnd) > sExact,
+          "same HWND+pid outranks title+class on a different handle");
+    LiveWindow recycledHwnd = sameHwnd;
+    recycledHwnd.pid = 99;
+    CHECK(WindowMatchScore(snapHwnd, recycledHwnd) < WindowMatchScore(snapHwnd, sameHwnd),
+          "recycled HWND in another process does not get the HWND bonus");
+}
+
+static void TestMatchAssignment()
+{
+    std::printf("[restore match assignment]\n");
+    WindowSnap weak;
+    weak.exeLeaf = "chrome.exe";
+    weak.className = "Chrome_WidgetWin_1";
+    weak.title = "";
+    WindowSnap strong;
+    strong.exeLeaf = "chrome.exe";
+    strong.className = "Chrome_WidgetWin_1";
+    strong.title = "Gmail";
+
+    LiveWindow gmail;
+    gmail.exeLeaf = "chrome.exe";
+    gmail.className = "Chrome_WidgetWin_1";
+    gmail.title = "Gmail";
+    LiveWindow other;
+    other.exeLeaf = "chrome.exe";
+    other.className = "Chrome_WidgetWin_1";
+    other.title = "Other";
+
+    std::vector<WindowSnap> snaps = {weak, strong};
+    std::vector<LiveWindow> live = {gmail, other};
+    std::vector<int> assigned = AssignRestoreMatches(snaps, live);
+    CHECK(assigned.size() == 2, "assignment covers both snaps");
+    CHECK(assigned[1] == 0, "titled snap claims the Gmail window");
+    CHECK(assigned[0] == 1, "untitled snap takes the leftover window");
+}
+
+static void TestCollapseDetection()
+{
+    std::printf("[collapse detection]\n");
+    WindowSnap a;
+    a.exeLeaf = "a.exe";
+    a.className = "A";
+    a.title = "A";
+    a.monitorId = "m_left";
+    WindowSnap b = a;
+    b.exeLeaf = "b.exe";
+    b.title = "B";
+    b.className = "B";
+    b.monitorId = "m_right";
+    WindowSnap c = a;
+    c.exeLeaf = "c.exe";
+    c.title = "C";
+    c.className = "C";
+    c.monitorId = "m_left";
+    WindowSnap d = a;
+    d.exeLeaf = "d.exe";
+    d.title = "D";
+    d.className = "D";
+    d.monitorId = "m_right";
+
+    std::vector<WindowSnap> saved = {a, b, c, d};
+
+    std::vector<WindowSnap> stable = saved;
+    CHECK(!LayoutLooksCollapsed(saved, stable), "identical placement is not a collapse");
+
+    std::vector<WindowSnap> oneMoved = saved;
+    oneMoved[1].monitorId = "m_left"; // user dragged one window
+    CHECK(!LayoutLooksCollapsed(saved, oneMoved), "one of four windows moved is not a collapse");
+
+    std::vector<WindowSnap> piled = saved;
+    piled[1].monitorId = "m_left";
+    piled[3].monitorId = "m_left"; // half fled
+    CHECK(LayoutLooksCollapsed(saved, piled), "half the windows on the wrong monitor is a collapse");
+
+    std::vector<WindowSnap> empty;
+    CHECK(!LayoutLooksCollapsed(saved, empty), "empty current capture is not a collapse");
 }
 
 static void TestIpcFraming()
@@ -248,6 +357,68 @@ static void TestIpcFraming()
 
     CloseHandle(rd);
     CloseHandle(wr);
+}
+
+static void TestLastWakeParser()
+{
+    std::printf("[powercfg /lastwake parser]\n");
+    std::string type;
+    std::string name;
+    bool empty = false;
+    ParseLastWake("Wake History Count - 0\r\n", type, name, empty);
+    CHECK(empty, "zero-source lastwake is empty");
+
+    ParseLastWake(
+        "Wake History Count - 1\r\n"
+        "Wake History [0]\r\n"
+        "  Wake Source Count - 1\r\n"
+        "  Wake Source [0]\n"
+        "    Type: Device\r\n"
+        "    Instance Path: PCI\\VEN_10EC\r\n"
+        "    Friendly Name: Realtek PCIe GbE Family Controller\r\n",
+        type, name, empty);
+    CHECK(!empty, "named lastwake is not empty");
+    CHECK(type == "Device", "lastwake type parsed");
+    CHECK(name.find("Realtek") != std::string::npos, "lastwake friendly name parsed");
+}
+
+static void TestWakeTimersParser()
+{
+    std::printf("[powercfg /waketimers parser]\n");
+    bool needAdmin = false;
+    auto none = ParseWakeTimers("There are no active wake timers in the system.\r\n", needAdmin);
+    CHECK(none.empty(), "no active wake timers -> empty");
+    CHECK(!needAdmin, "plain empty is not an admin failure");
+
+    const char* sample =
+        "Timer set by [SERVICE] \\Device\\HarddiskVolume3\\Windows\\System32\\svchost.exe (SystemEventsBroker) expires at 14:00:00.\r\n"
+        "  Reason: Windows will execute '\\Microsoft\\Windows\\UpdateOrchestrator\\Reboot' scheduled task.\r\n";
+    auto timers = ParseWakeTimers(sample, needAdmin);
+    CHECK(timers.size() == 1, "one wake timer parsed");
+    if (!timers.empty())
+    {
+        CHECK(timers[0].owner.find("svchost.exe") != std::string::npos, "timer owner captured");
+        CHECK(timers[0].reason.find("UpdateOrchestrator") != std::string::npos, "timer reason captured");
+    }
+}
+
+static void TestRunCaptureTimeout()
+{
+    std::printf("[process timeout]\n");
+    ULONGLONG t0 = GetTickCount64();
+    ProcessResult r = RunCapture(L"cmd.exe /c ping -n 20 127.0.0.1 >nul", 800);
+    ULONGLONG dt = GetTickCount64() - t0;
+    CHECK(r.launched, "timeout test process launched");
+    CHECK(dt < 5000, "hung child is killed within 5s (was unbounded ReadFile)");
+}
+
+static void TestLiveTopology()
+{
+    std::printf("[live topology query]\n");
+    Topology t;
+    CHECK(QueryActiveTopology(t), "QueryActiveTopology succeeds on this machine");
+    CHECK(t.Count() >= 1, "at least one monitor");
+    CHECK(!t.signature.empty(), "signature is set");
 }
 
 static void TestSleepStudy()
@@ -295,9 +466,15 @@ int main()
     TestSameModelCollision();
     TestCoordRoundTrip();
     TestMatchScore();
+    TestMatchAssignment();
+    TestCollapseDetection();
     TestIpcFraming();
     TestRequestsParser();
     TestWakeArmedParser();
+    TestLastWakeParser();
+    TestWakeTimersParser();
+    TestRunCaptureTimeout();
+    TestLiveTopology();
     TestSleepStudy();
     TestLiveDoctor();
     std::printf("========================\n%d/%d checks passed%s\n",

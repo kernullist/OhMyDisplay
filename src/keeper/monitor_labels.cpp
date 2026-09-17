@@ -115,4 +115,26 @@ namespace omd
         topo.signature = ComputeSignature(finalIds);
         return collision;
     }
+
+    bool HasUnlabeledCollision(const Topology& topo)
+    {
+        bool needs = false;
+        do
+        {
+            std::map<std::string, int> counts;
+            for (const auto& m : topo.monitors)
+            {
+                counts[m.baseId]++;
+            }
+            for (const auto& m : topo.monitors)
+            {
+                if (counts[m.baseId] > 1 && m.label.empty())
+                {
+                    needs = true;
+                    break;
+                }
+            }
+        } while (false);
+        return needs;
+    }
 }

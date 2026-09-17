@@ -14,7 +14,7 @@ Implements the v0 (MVP) scope of [`OhMyDisplay-design.md`](OhMyDisplay-design.md
 ## Status
 
 v0 MVP + initial v1 features, building and running. Single portable exe, no .NET / external
-runtime. Zero `/W4 /permissive-` warnings; 46 test checks pass.
+runtime. Zero `/W4 /permissive-` warnings; 72 test checks pass.
 
 | Component | State |
 |---|---|
@@ -51,7 +51,7 @@ Artifacts land in `build\`:
 
 ### Releases
 
-Pushing a `v*` tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`) runs the release
+Pushing a `v*` tag (e.g. `git tag v0.3.0 && git push origin v0.3.0`) runs the release
 workflow: it builds Release, runs the tests, and publishes a GitHub Release with the two
 exes plus a zipped bundle. Release binaries are currently unsigned (Authenticode signing is
 a planned hardening item, so SmartScreen will warn on first run).
@@ -61,15 +61,19 @@ a planned hardening item, so SmartScreen will warn on first run).
 Run `OhMyDisplay.exe`. It lives in the tray. Right-click the icon for:
 
 - **Save / Restore layout now** (also `Ctrl+Alt+S` / `Ctrl+Alt+R`)
-- **Sleep Doctor report** - opens an HTML report in the default browser
+- **Sleep Doctor report** - embedded WebView2 window (native text if the runtime is missing)
 - **Sleep Doctor report (full, admin)** - additionally collects admin-only sections
   (`/requests`, `/waketimers`) through the elevated helper over named-pipe IPC; prompts
-  for consent once via UAC
+  for consent once via UAC. Wake-on-LAN findings get a one-click **Disable wake** button.
 - **Monitor labels** - name each monitor; required to disambiguate identical models
 - **Detect ghost monitors** - lists phantom display entries the system still remembers
 
-Layouts are saved automatically when a new topology is first seen, and restored after an
-adaptive debounce when a known topology reappears (e.g. after monitor sleep/resume).
+Layouts are saved automatically on first sight of a topology (and whenever you click
+**Save layout now**). Restore runs only when a known topology looks **collapsed** (a
+substantial share of windows have fled to the wrong monitor), not on every
+`WM_DISPLAYCHANGE`. Stable-topology events leave the last good snapshot alone so a
+game going fullscreen cannot overwrite it. A second launch of the exe activates the
+already-running copy.
 
 Data lives in `%LOCALAPPDATA%\OhMyDisplay\` (`layouts.json`, `settings.json`, `logs\`,
 `report.html`). Nothing is sent anywhere.
@@ -107,6 +111,14 @@ bus and react independently; they do not depend on each other.
 - **Adaptive sliding debounce**: `clamp(base + perMonitor*count, min, max)`; a new
   topology change inside the window slides the deadline so restore fires only after
   monitors stop coming back.
+- **Collapse-aware restore**: after debounce, current window monitors are compared to the
+  snapshot. Restore only if at least half the matched windows sit on the wrong display.
+  Otherwise the snapshot is left alone (a stray `WM_DISPLAYCHANGE` from a game
+  fullscreen or DPI tweak must not yank windows *or* persist the transient layout).
+  Use **Save layout now** after rearranging.
+- **Restore matching** is a global highest-score assignment (HWND > title > class > exe)
+  so a weak untitled window cannot steal a better match. Verification is one shared 200ms
+  settle, then retries only the windows that missed.
 - **Coordinate model**: window rects normalized to the owning monitor work area (survives
   resolution changes); `WINDOWPLACEMENT` workspace<->screen offset handled via the primary
   work area; min/max/normal restored in one `SetWindowPlacement`.
@@ -133,25 +145,26 @@ bus and react independently; they do not depend on each other.
 
 ## Verification status & hardware requirements
 
-Verified on a single-monitor, S3-only (no Modern Standby) Windows 11 dev box:
+Verified on a dual-monitor, S3-only (no Modern Standby) Windows 11 box (two identical
+Gigabyte G27Q panels, distinct connector UIDs):
 
-- **Verified working here:** Layout Keeper capture/save/restore (11/11 windows restored on a
-  real topology, EDID-based identity), Sleep Doctor collection + event-log timeline + report
-  generation, adaptive debounce, JSON store round-trip, named-pipe IPC framing, and the full
-  test harness (46 checks).
-- **Needs 2+ monitors to exercise:** the headline collapse/restore behavior. With one monitor
-  there is no other screen for windows to flee to, so a real collapse cannot occur. The
-  multi-monitor logic (topology signature order-independence, same-model collision tie-break,
-  cross-monitor coordinate scaling, restore matching) is covered by unit tests against
-  synthetic topologies, but real docking/undocking behavior requires a multi-monitor setup
-  (or a virtual display driver such as an IDD-based one).
-- **Needs Modern Standby hardware to exercise:** SleepStudy/DRIPS. This dev box is S3-only, so
+- **Verified working here:** Layout Keeper startup capture (9 windows, two-monitor
+  topology, EDID + device-path identity, HWND persisted for same-session matching), Sleep
+  Doctor collection + event-log timeline + report generation, adaptive debounce (800ms for
+  2 monitors), JSON store round-trip, named-pipe IPC framing, single-instance activation,
+  `GUID_MONITOR_POWER_ON` handling, and the full test harness (72 checks).
+- **Collapse/restore on this box:** the two panels are always present in this session, so a
+  real sleep-collapse was not reproduced here. Collapse detection, global match assignment,
+  coordinate scaling, and same-model collision tie-break are covered by unit tests against
+  synthetic topologies. A real dock/undock or monitor-sleep collapse still wants a physical
+  unplug (or an IDD virtual display) to watch windows flee and come back.
+- **Needs Modern Standby hardware to exercise:** SleepStudy/DRIPS. This box is S3-only, so
   the tool correctly reports "legacy S3 - not applicable." DRIPS data only appears on a
   Modern Standby (S0 low power idle) laptop/tablet.
 - **Not auto-verifiable in a headless agent shell:** live GUI rendering (tray menus, label
-  editor, the WebView2 window) and the elevated UAC round-trip. These work when the app is
-  run interactively on a normal desktop; only the automated harness could not click/observe
-  them.
+  editor, the WebView2 window, one-click Disable wake) and the elevated UAC round-trip.
+  These work when the app is run interactively on a normal desktop; the automated harness
+  does not click them.
 
 ## Not yet implemented (v2+)
 

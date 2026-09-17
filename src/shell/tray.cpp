@@ -81,6 +81,9 @@ namespace omd
                 [this](HWND, UINT, WPARAM, LPARAM, LRESULT& result) -> bool
                 {
                     Shell_NotifyIconW(NIM_ADD, &nid_);
+                    nid_.uVersion = NOTIFYICON_VERSION_4;
+                    Shell_NotifyIconW(NIM_SETVERSION, &nid_);
+                    added_ = true;
                     result = 0;
                     return true;
                 });

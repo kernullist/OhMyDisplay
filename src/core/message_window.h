@@ -33,6 +33,9 @@ namespace omd
             return hwnd_;
         }
 
+        // Window class used by the hidden hub. Second-instance activation looks this up.
+        static const wchar_t* ClassName();
+
         // Register a handler for a message id. Multiple handlers per id run in order
         // until one consumes the message.
         void AddHandler(UINT msg, Handler handler);

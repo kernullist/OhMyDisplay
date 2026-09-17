@@ -79,6 +79,8 @@ namespace omd
             json::Value match = json::Value::MakeObject();
             match.Set("class", json::Value(w.className));
             o.Set("match", std::move(match));
+            // HWND is runtime-only. Persisting it across sessions matches the wrong
+            // window after handle reuse (same exe, recycled HWND).
             return o;
         }
 

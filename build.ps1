@@ -41,21 +41,20 @@ if ($Clean -and (Test-Path $buildDir)) {
     Remove-Item -Recurse -Force $buildDir
 }
 
-# Configure if the build tree is not yet generated.
-if (-not (Test-Path (Join-Path $buildDir "build.ninja"))) {
-    $cmakeArgs = @(
-        "-S", $root, "-B", $buildDir, "-G", "Ninja",
-        "-DCMAKE_BUILD_TYPE=$Config",
-        "-DCMAKE_C_COMPILER=cl",
-        "-DCMAKE_CXX_COMPILER=cl"
-    )
-    # Pin the make program only when we actually found a Ninja binary.
-    if (-not [string]::IsNullOrWhiteSpace($ninja)) {
-        $cmakeArgs += "-DCMAKE_MAKE_PROGRAM=$ninja"
-    }
-    & $cmake @cmakeArgs
-    if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+# Always (re)configure so CMAKE_BUILD_TYPE tracks -Config. Ninja is single-config;
+# skipping this after a Debug tree was generated silently kept building Debug.
+$cmakeArgs = @(
+    "-S", $root, "-B", $buildDir, "-G", "Ninja",
+    "-DCMAKE_BUILD_TYPE=$Config",
+    "-DCMAKE_C_COMPILER=cl",
+    "-DCMAKE_CXX_COMPILER=cl"
+)
+# Pin the make program only when we actually found a Ninja binary.
+if (-not [string]::IsNullOrWhiteSpace($ninja)) {
+    $cmakeArgs += "-DCMAKE_MAKE_PROGRAM=$ninja"
 }
+& $cmake @cmakeArgs
+if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 
 $args = @("--build", $buildDir)
 if ($Target -ne "") { $args += @("--target", $Target) }

@@ -115,7 +115,13 @@ namespace omd
                     lock.unlock();
                     if (cb_)
                     {
-                        cb_();
+                        try
+                        {
+                            cb_();
+                        }
+                        catch (...)
+                        {
+                        }
                     }
                     lock.lock();
                 }

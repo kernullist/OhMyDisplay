@@ -159,10 +159,14 @@ namespace omd
                 break;
             }
 
-            // Unique pipe name: pid + tick + a random component.
+            // Unique pipe name: pid + tick + QPC (no rand() seed required).
+            LARGE_INTEGER qpc;
+            QueryPerformanceCounter(&qpc);
             wchar_t name[128];
-            swprintf_s(name, L"\\\\.\\pipe\\OhMyDisplay.%lu.%lu.%lu",
-                       GetCurrentProcessId(), GetTickCount(), static_cast<unsigned long>(rand()));
+            swprintf_s(name, L"\\\\.\\pipe\\OhMyDisplay.%lu.%llu.%lld",
+                       GetCurrentProcessId(),
+                       GetTickCount64(),
+                       static_cast<long long>(qpc.QuadPart));
             std::wstring pipeName = name;
 
             pipe = CreateNamedPipeW(pipeName.c_str(), PIPE_ACCESS_DUPLEX,

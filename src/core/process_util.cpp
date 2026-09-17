@@ -21,71 +21,165 @@ namespace omd
 
         HANDLE readPipe = nullptr;
         HANDLE writePipe = nullptr;
-        if (CreatePipe(&readPipe, &writePipe, &sa, 0) == 0)
-        {
-            OMD_LOGE("run: CreatePipe failed gle=%lu", GetLastError());
-            return result;
-        }
-        // The child must not inherit the read end.
-        SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
-
-        STARTUPINFOW si;
-        ZeroMemory(&si, sizeof(si));
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        si.hStdOutput = writePipe;
-        si.hStdError = writePipe;
-        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-
         PROCESS_INFORMATION pi;
         ZeroMemory(&pi, sizeof(pi));
 
-        std::wstring mutableCmd = commandLine; // CreateProcessW may modify the buffer
-        BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
-                                 CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-        if (ok == 0)
+        do
         {
-            OMD_LOGE("run: CreateProcess failed gle=%lu cmd=%ls", GetLastError(), commandLine.c_str());
-            CloseHandle(readPipe);
-            CloseHandle(writePipe);
-            return result;
-        }
-        result.launched = true;
-
-        // Close our copy of the write end so ReadFile sees EOF when the child exits.
-        CloseHandle(writePipe);
-        writePipe = nullptr;
-
-        std::string raw;
-        char buf[4096];
-        DWORD read = 0;
-        while (ReadFile(readPipe, buf, sizeof(buf), &read, nullptr) != 0 && read > 0)
-        {
-            raw.append(buf, read);
-        }
-        CloseHandle(readPipe);
-
-        WaitForSingleObject(pi.hProcess, timeoutMs);
-        DWORD code = 0;
-        GetExitCodeProcess(pi.hProcess, &code);
-        result.exitCode = code;
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-
-        // powercfg emits ANSI/OEM text; convert from the console code page to UTF-8.
-        std::wstring wide;
-        if (!raw.empty())
-        {
-            UINT cp = GetOEMCP();
-            int needed = MultiByteToWideChar(cp, 0, raw.data(), static_cast<int>(raw.size()), nullptr, 0);
-            if (needed > 0)
+            if (CreatePipe(&readPipe, &writePipe, &sa, 0) == 0)
             {
-                wide.resize(static_cast<size_t>(needed));
-                MultiByteToWideChar(cp, 0, raw.data(), static_cast<int>(raw.size()), wide.data(), needed);
+                OMD_LOGE("run: CreatePipe failed gle=%lu", GetLastError());
+                break;
             }
+            // The child must not inherit the read end.
+            SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+            STARTUPINFOW si;
+            ZeroMemory(&si, sizeof(si));
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+            si.hStdOutput = writePipe;
+            si.hStdError = writePipe;
+            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+            std::wstring mutableCmd = commandLine; // CreateProcessW may modify the buffer
+            if (CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
+                               CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) == 0)
+            {
+                OMD_LOGE("run: CreateProcess failed gle=%lu cmd=%ls", GetLastError(), commandLine.c_str());
+                break;
+            }
+            result.launched = true;
+
+            // Close our copy of the write end so ReadFile sees EOF when the child exits.
+            CloseHandle(writePipe);
+            writePipe = nullptr;
+
+            // Drain stdout while waiting. Waiting first can deadlock when the pipe fills;
+            // reading first made timeoutMs a no-op because ReadFile blocked until exit.
+            // timeoutMs == 0 means "use the 15s default"; INFINITE means wait forever.
+            std::string raw;
+            const size_t kMaxOutput = 16u * 1024u * 1024u;
+            DWORD waitMs = timeoutMs;
+            if (waitMs == 0)
+            {
+                waitMs = 15000;
+            }
+            const ULONGLONG start = GetTickCount64();
+            const ULONGLONG budget = (waitMs == INFINITE)
+                                         ? ~0ull
+                                         : static_cast<ULONGLONG>(waitMs);
+            bool timedOut = false;
+            bool childDone = false;
+            while (!childDone)
+            {
+                if (!timedOut && (GetTickCount64() - start) >= budget)
+                {
+                    timedOut = true;
+                    TerminateProcess(pi.hProcess, 1);
+                }
+
+                DWORD avail = 0;
+                if (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &avail, nullptr) != 0 && avail > 0)
+                {
+                    char buf[4096];
+                    DWORD toRead = (avail > sizeof(buf)) ? static_cast<DWORD>(sizeof(buf)) : avail;
+                    DWORD got = 0;
+                    if (ReadFile(readPipe, buf, toRead, &got, nullptr) != 0 && got > 0)
+                    {
+                        if (raw.size() < kMaxOutput)
+                        {
+                            size_t room = kMaxOutput - raw.size();
+                            raw.append(buf, (static_cast<size_t>(got) > room) ? room : static_cast<size_t>(got));
+                        }
+                        if (raw.size() >= kMaxOutput)
+                        {
+                            timedOut = true;
+                            TerminateProcess(pi.hProcess, 1);
+                            // Fall through to wait; do not spin-read the rest of the pipe.
+                        }
+                        else
+                        {
+                            continue;
+                        }
+                    }
+                }
+
+                DWORD wait = WaitForSingleObject(pi.hProcess, timedOut ? 0 : 50);
+                if (wait == WAIT_OBJECT_0)
+                {
+                    // Final drain.
+                    DWORD leftover = 0;
+                    while (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &leftover, nullptr) != 0 &&
+                           leftover > 0)
+                    {
+                        if (raw.size() >= kMaxOutput)
+                        {
+                            break;
+                        }
+                        char buf[4096];
+                        DWORD toRead = (leftover > sizeof(buf)) ? static_cast<DWORD>(sizeof(buf)) : leftover;
+                        DWORD got = 0;
+                        if (ReadFile(readPipe, buf, toRead, &got, nullptr) == 0 || got == 0)
+                        {
+                            break;
+                        }
+                        size_t room = kMaxOutput - raw.size();
+                        raw.append(buf, (static_cast<size_t>(got) > room) ? room : static_cast<size_t>(got));
+                    }
+                    childDone = true;
+                }
+                else if (timedOut)
+                {
+                    WaitForSingleObject(pi.hProcess, 2000);
+                    childDone = true;
+                }
+            }
+
+            DWORD code = 1;
+            GetExitCodeProcess(pi.hProcess, &code);
+            if (code == STILL_ACTIVE)
+            {
+                TerminateProcess(pi.hProcess, 1);
+                WaitForSingleObject(pi.hProcess, 2000);
+                code = 1;
+            }
+            result.exitCode = code;
+
+            // powercfg emits ANSI/OEM text; convert from the console code page to UTF-8.
+            std::wstring wide;
+            if (!raw.empty())
+            {
+                UINT cp = GetOEMCP();
+                int needed = MultiByteToWideChar(cp, 0, raw.data(), static_cast<int>(raw.size()),
+                                                 nullptr, 0);
+                if (needed > 0)
+                {
+                    wide.resize(static_cast<size_t>(needed));
+                    MultiByteToWideChar(cp, 0, raw.data(), static_cast<int>(raw.size()),
+                                        wide.data(), needed);
+                }
+            }
+            result.output = Utf8FromWide(wide);
+        } while (false);
+
+        if (writePipe != nullptr)
+        {
+            CloseHandle(writePipe);
         }
-        result.output = Utf8FromWide(wide);
+        if (readPipe != nullptr)
+        {
+            CloseHandle(readPipe);
+        }
+        if (pi.hProcess != nullptr)
+        {
+            CloseHandle(pi.hProcess);
+        }
+        if (pi.hThread != nullptr)
+        {
+            CloseHandle(pi.hThread);
+        }
         return result;
     }
 

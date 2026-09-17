@@ -1,5 +1,6 @@
 // OhMyDisplay - ghost monitor detection implementation.
 #include "keeper/ghost_monitor.h"
+#include "core/display_topology.h"
 #include "core/common.h"
 #include "core/logger.h"
 
@@ -13,23 +14,13 @@ namespace omd
         std::vector<GhostMonitor> ghosts;
         do
         {
-            UINT32 numPaths = 0;
-            UINT32 numModes = 0;
             // QDC_ALL_PATHS returns active and inactive (remembered) paths.
-            LONG rc = GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &numPaths, &numModes);
-            if (rc != ERROR_SUCCESS)
+            std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+            std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+            if (!QueryDisplayConfigRetry(QDC_ALL_PATHS, paths, modes))
             {
                 break;
             }
-            std::vector<DISPLAYCONFIG_PATH_INFO> paths(numPaths);
-            std::vector<DISPLAYCONFIG_MODE_INFO> modes(numModes);
-            rc = QueryDisplayConfig(QDC_ALL_PATHS, &numPaths, paths.data(),
-                                    &numModes, modes.data(), nullptr);
-            if (rc != ERROR_SUCCESS)
-            {
-                break;
-            }
-            paths.resize(numPaths);
 
             for (const auto& p : paths)
             {

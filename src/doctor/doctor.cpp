@@ -51,7 +51,7 @@ namespace omd
         return path;
     }
 
-    bool Doctor::ApplyDisableWake(const std::string& deviceName)
+    bool ApplyDeviceDisableWake(const std::string& deviceName)
     {
         bool ok = false;
         do
@@ -76,6 +76,11 @@ namespace omd
             ok = respOk && exitCode == 0;
         } while (false);
         return ok;
+    }
+
+    bool Doctor::ApplyDisableWake(const std::string& deviceName)
+    {
+        return ApplyDeviceDisableWake(deviceName);
     }
 
     bool Doctor::CollectSleepStudyElevated(SleepStudyData& out)

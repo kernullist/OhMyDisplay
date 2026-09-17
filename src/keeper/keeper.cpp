@@ -164,27 +164,28 @@ namespace omd
         bool found = false;
         bool autoSaved = false;
         size_t savedCount = 0;
+        std::vector<WindowSnap> current;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             collision = ResolveIdentities(topo, store_.Labels());
+            current = CaptureWindows(topo, settings_.keeper);
             const StoredTopology* st = store_.FindBySignature(topo.signature);
             if (st != nullptr)
             {
                 snapCopy = *st;
                 found = true;
             }
-            else
+            else if (!current.empty())
             {
                 // Unknown topology: capture and store so future collapses can restore.
-                std::vector<WindowSnap> wins = CaptureWindows(topo, settings_.keeper);
-                savedCount = wins.size();
-                store_.Upsert(topo, wins);
+                savedCount = current.size();
+                store_.Upsert(topo, current);
                 store_.Save();
                 autoSaved = true;
             }
         }
 
-        if (collision && onCollision)
+        if (collision && HasUnlabeledCollision(topo) && onCollision)
         {
             onCollision("Two identical monitors detected. Please label them to tell them apart.");
         }
@@ -199,7 +200,12 @@ namespace omd
             return;
         }
 
-        if (found)
+        if (!found)
+        {
+            return;
+        }
+
+        if (LayoutLooksCollapsed(snapCopy.windows, current))
         {
             RestoreEngine engine(settings_.keeper);
             RestoreResult res = engine.Restore(snapCopy, topo);
@@ -210,6 +216,11 @@ namespace omd
                               res.restored, res.total);
                 onNotify(buf);
             }
+            return;
         }
+
+        // Known topology, not collapsed: leave the last good snapshot alone.
+        // Refreshing here would persist game-fullscreen / DPI transients.
+        OMD_LOGI("keeper: topology stable, snapshot kept (%zu live windows)", current.size());
     }
 }

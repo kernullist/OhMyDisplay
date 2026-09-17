@@ -27,12 +27,72 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 using namespace omd;
 
 namespace
 {
     const UINT OMD_MSG_NOTIFY = WM_APP + 10; // lParam: std::string* (balloon text)
+    const UINT OMD_MSG_OPEN_LABELS = WM_APP + 11;
+    const UINT OMD_MSG_SECOND_INSTANCE = WM_APP + 12;
+
+    class JobGate
+    {
+    public:
+        void Run(std::function<void()> fn)
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (stopping_.load())
+                {
+                    return;
+                }
+                inflight_.fetch_add(1);
+            }
+            try
+            {
+                std::thread([this, work = std::move(fn)]()
+                {
+                    try
+                    {
+                        work();
+                    }
+                    catch (...)
+                    {
+                    }
+                    inflight_.fetch_sub(1);
+                    cv_.notify_all();
+                }).detach();
+            }
+            catch (...)
+            {
+                inflight_.fetch_sub(1);
+                cv_.notify_all();
+            }
+        }
+
+        void Shutdown()
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                stopping_.store(true);
+            }
+            // Must wait until every job that captured &app has finished. Timing out
+            // here and then destroying App is a use-after-free (UAC doctor, restore).
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [this] { return inflight_.load() == 0; });
+        }
+
+    private:
+        std::atomic<int> inflight_{0};
+        std::atomic<bool> stopping_{false};
+        std::mutex mutex_;
+        std::condition_variable cv_;
+    };
 
     struct App
     {
@@ -46,27 +106,43 @@ namespace
         std::unique_ptr<Keeper> keeper;
         std::unique_ptr<Doctor> doctor;
         HICON icon = nullptr;
+        JobGate jobs;
+
+        bool labelEditorOpen = false;
 
         void PostNotify(const std::string& text)
         {
-            PostMessageW(hub.Handle(), OMD_MSG_NOTIFY, 0,
-                         reinterpret_cast<LPARAM>(new std::string(text)));
+            auto* s = new std::string(text);
+            if (PostMessageW(hub.Handle(), OMD_MSG_NOTIFY, 0, reinterpret_cast<LPARAM>(s)) == 0)
+            {
+                delete s;
+            }
         }
     };
 
-    // Run a Keeper/Doctor action on a worker thread so the message pump stays live.
-    void RunAsync(std::function<void()> fn)
-    {
-        std::thread(std::move(fn)).detach();
-    }
-
     void OpenLabelEditor(App& app)
     {
+        if (app.labelEditorOpen)
+        {
+            return;
+        }
         Topology topo = app.keeper->CurrentResolvedTopology();
         if (topo.Empty())
         {
             return;
         }
+        struct EditorGuard
+        {
+            bool& flag;
+            explicit EditorGuard(bool& f) : flag(f)
+            {
+                flag = true;
+            }
+            ~EditorGuard()
+            {
+                flag = false;
+            }
+        } editorGuard(app.labelEditorOpen);
         // Mark same-model collisions (monitors sharing a base identity).
         std::map<std::string, int> baseCount;
         for (const auto& m : topo.monitors)
@@ -124,30 +200,30 @@ namespace
     {
         app.tray.onSave = [&app]
         {
-            RunAsync([&app] { app.keeper->SaveNow(); });
+            app.jobs.Run([&app] { app.keeper->SaveNow(); });
         };
         app.tray.onRestore = [&app]
         {
-            RunAsync([&app] { app.keeper->RestoreNow(); });
+            app.jobs.Run([&app] { app.keeper->RestoreNow(); });
         };
         app.tray.onDoctor = [&app]
         {
             app.PostNotify("Running Sleep Doctor...");
-            RunAsync([&app]
+            app.jobs.Run([&app]
             {
                 DoctorReport rep = app.doctor->Run(false);
                 WriteHtmlReport(rep);   // persisted for support bundles
-                ShowReportWindow(rep);  // embedded WebView2 / text window
+                ShowReportWindow(rep, app.settings.doctor.useWebView2);
             });
         };
         app.tray.onDoctorAdmin = [&app]
         {
             app.PostNotify("Running Sleep Doctor (admin)...");
-            RunAsync([&app]
+            app.jobs.Run([&app]
             {
                 DoctorReport rep = app.doctor->Run(true);
                 WriteHtmlReport(rep);
-                ShowReportWindow(rep);
+                ShowReportWindow(rep, app.settings.doctor.useWebView2);
             });
         };
         app.tray.onLabels = [&app]
@@ -183,15 +259,30 @@ namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 {
-    // Single-instance guard.
+    // Single-instance guard. A second launch tells the running copy to balloon
+    // instead of exiting silently.
     HANDLE singleton = CreateMutexW(nullptr, FALSE, L"Local\\OhMyDisplay.SingleInstance");
     if (singleton != nullptr && GetLastError() == ERROR_ALREADY_EXISTS)
     {
+        HWND existing = nullptr;
+        for (int i = 0; i < 40 && existing == nullptr; ++i)
+        {
+            existing = FindWindowW(MessageWindow::ClassName(), L"OhMyDisplay");
+            if (existing == nullptr)
+            {
+                Sleep(50);
+            }
+        }
+        if (existing != nullptr)
+        {
+            PostMessageW(existing, OMD_MSG_SECOND_INSTANCE, 0, 0);
+        }
+        CloseHandle(singleton);
         return 0;
     }
 
     Logger::Instance().Init(L"main", LogLevel::Info);
-    OMD_LOGI("OhMyDisplay starting (v0.2)");
+    OMD_LOGI("OhMyDisplay starting (v0.3)");
 
     App app;
     app.hInst = hInstance;
@@ -216,6 +307,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     app.keeper->onCollision = [&app](const std::string& s)
     {
         app.PostNotify(s);
+        PostMessageW(app.hub.Handle(), OMD_MSG_OPEN_LABELS, 0, 0);
     };
 
     app.keeper->Init();
@@ -255,6 +347,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         return true;
     });
 
+    app.hub.AddHandler(OMD_MSG_OPEN_LABELS, [&app](HWND, UINT, WPARAM, LPARAM, LRESULT& result) -> bool
+    {
+        OpenLabelEditor(app);
+        result = 0;
+        return true;
+    });
+
+    app.hub.AddHandler(OMD_MSG_SECOND_INSTANCE, [&app](HWND, UINT, WPARAM, LPARAM, LRESULT& result) -> bool
+    {
+        app.tray.ShowBalloon("OhMyDisplay", "Already running. Right-click the tray icon.");
+        result = 0;
+        return true;
+    });
+
     app.power.Register(app.hub, app.bus);
 
     if (!app.tray.Create(app.hub, app.icon))
@@ -267,12 +373,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     app.hotkeys.Init(app.hub);
     app.hotkeys.Register(app.settings.hotkeys.saveNow, [&app]
     {
-        RunAsync([&app] { app.keeper->SaveNow(); });
+        app.jobs.Run([&app] { app.keeper->SaveNow(); });
     });
     app.hotkeys.Register(app.settings.hotkeys.restoreNow, [&app]
     {
-        RunAsync([&app] { app.keeper->RestoreNow(); });
+        app.jobs.Run([&app] { app.keeper->RestoreNow(); });
     });
+
+    // Capture (or restore) the current topology shortly after startup so the first
+    // sleep/resume cycle has a snapshot even if no DisplayChanged has fired yet.
+    app.keeper->OnTopologyEvent();
 
     app.tray.ShowBalloon("OhMyDisplay", "Running in the tray. Right-click the icon for options.");
 
@@ -285,10 +395,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     }
 
     OMD_LOGI("OhMyDisplay shutting down");
+    CloseReportWindows();
+    app.jobs.Shutdown();
     app.hotkeys.Shutdown();
-    app.tray.Destroy();
     app.power.Unregister();
     app.keeper->Shutdown();
+    MSG drain;
+    while (PeekMessageW(&drain, app.hub.Handle(), OMD_MSG_NOTIFY, OMD_MSG_NOTIFY, PM_REMOVE) != 0)
+    {
+        delete reinterpret_cast<std::string*>(drain.lParam);
+    }
+    app.tray.Destroy();
     app.hub.Destroy();
 
     if (singleton != nullptr)

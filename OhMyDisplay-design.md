@@ -239,7 +239,16 @@ TopologySignature = sorted_set( MonitorIdentity[] )
 
 #### 8.2.4 창 캡처(Snapshot)
 
-- `EnumWindows`로 top-level 순회 -> 필터: visible, non-tool, owner 없음, ALT-TAB 노출(클로킹 제외), 최소화 포함.
+- `EnumWindows`로 top-level 순회 -> 필터는 작업 표시줄 규칙을 따른다(exe 목록이 아님):
+  - visible, 크기 0이 아닌 창(최소화 포함).
+  - `WS_EX_APPWINDOW`가 있으면 tool/owned/no-activate여도 포함(작업 표시줄 강제 노출).
+  - 그 외에는 `WS_EX_TOOLWINDOW`/`WS_EX_NOACTIVATE` 제외, ALT-TAB owner walk 승자만 포함.
+  - 클로킹: 앱 클로킹은 제외. 셸 클로킹은 `IVirtualDesktopManager`가 다른 가상 데스크톱에
+    있다고 보고할 때만 포함(일시 중단된 UWP 프레임은 제외).
+  - 셸 표면(Progman, 작업 표시줄)은 스타일로 걸러지므로 `explorer.exe`를 exe로 제외하지 않는다
+    (파일 탐색기 창 누락 방지).
+- 스냅(arranged) 창은 `rcNormalPosition`이 스냅 이전 rect이므로 실제 창 rect로 캡처하고, 복원 시
+  여전히 스냅 상태면 `SetWindowPos`로 명시 이동한다.
 - 각 창: `GetWindowPlacement`(WINDOWPLACEMENT: normal/min/max + restore rect), 소속 모니터 Identity(`MonitorFromWindow` -> CCD 매핑), 프로세스 경로(`QueryFullProcessImageNameW`), 가능하면 명령줄(실패 허용).
 - 좌표는 **소속 모니터 work area 기준 상대 좌표**로 정규화 저장(해상도 변화 대응).
 
@@ -309,6 +318,13 @@ on DisplayChanged or PowerResume:
 - **적응형 디바운스**가 안정성의 절반. 모니터가 순차 복귀하는 동안 즉시 복원하면 다시 튄다.
 - **검증 재시도**: 일부 앱은 자체적으로 위치를 되돌리므로 1회 복원으로 안 되는 경우가 있음.
 - 창 재식별은 핸들이 살아 있으면 핸들 우선, 죽었으면 클래스+타이틀+exe로 best-effort 매칭.
+  exe/클래스/타이틀이 모두 같은 창(예: 스티커 메모 여러 장)은 같은 모니터에서 현재 위치가 가장
+  가까운 창끼리 짝짓고, 그래도 같으면 캡처 순서를 따른다.
+- **불완전 토폴로지 무시**: 절전 복귀/핫플러그 중에는 일부 모니터의 CCD device path가 비어
+  Identity가 GDI 이름으로 대체되므로 잘못된 시그니처가 생긴다. 이런 토폴로지는 저장하지 않고
+  몇 차례 재시도한 뒤에만 그대로 받아들인다.
+- 디바운스 창은 마지막으로 안정된 모니터 수 기준으로 잡고, 대기 중인 마감 시각을 앞당기지 않는다
+  (3 -> 1 -> 3 복귀 중 1대 시점에 조기 발화 방지).
 
 #### 8.2.7 Collapse Guard (붕괴 차단)
 

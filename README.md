@@ -13,19 +13,21 @@ Implements the v0 (MVP) scope of [`OhMyDisplay-design.md`](OhMyDisplay-design.md
 
 ## Status
 
-v0 MVP + initial v1 features, building and running. Single portable exe, no .NET / external
-runtime. Zero `/W4 /permissive-` warnings; 94 test checks pass.
+v0 MVP + initial v1 features, building and running (current release: v0.4.0). Single
+portable exe, no .NET / external runtime. Zero `/W4 /permissive-` warnings; 100 test checks
+pass.
 
 | Component | State |
 |---|---|
 | Core (event bus, CCD topology + identity, power notify, JSON store, atomic write, logger) | done |
 | Layout Keeper (identity, adaptive sliding debounce, capture, restore + verify/retry, labels, ghost detect) | done |
+| Window coverage (taskbar rules, File Explorer, `WS_EX_APPWINDOW`, other virtual desktops, snapped windows, identical-title tie-break) | done (v0.4) |
 | Sleep Doctor (powercfg collectors + locale-robust parsers, event-log correlator, rule engine, HTML/text report) | done |
 | Sleep architecture + SleepStudy/DRIPS (Modern Standby detection, official report via helper, graceful S3 degrade) | done (v1) |
 | Embedded report window (WebView2 when available, native text fallback) | done (v1) |
 | Tray shell (icon, menu, balloons, global hotkeys, monitor label editor) | done |
 | Elevated helper (`requireAdministrator`, named-pipe IPC, safe powercfg actions, admin collection) | done |
-| Test harness (debounce, JSON, signature, collision tie-break, coord round-trip, match scoring, IPC framing, live doctor) | done |
+| Test harness (debounce, JSON, signature, collision tie-break, coord round-trip, match scoring, IPC framing, live window filter + restore round-trip, live doctor) | done |
 
 ## Build
 
@@ -51,7 +53,7 @@ Artifacts land in `build\`:
 
 ### Releases
 
-Pushing a `v*` tag (e.g. `git tag v0.3.0 && git push origin v0.3.0`) runs the release
+Pushing a `v*` tag (e.g. `git tag v0.4.0 && git push origin v0.4.0`) runs the release
 workflow: it builds Release, runs the tests, and publishes a GitHub Release with the two
 exes plus a zipped bundle. Release binaries are currently unsigned (Authenticode signing is
 a planned hardening item, so SmartScreen will warn on first run).
@@ -166,7 +168,16 @@ Gigabyte G27Q panels, distinct connector UIDs):
   topology, EDID + device-path identity, HWND persisted for same-session matching), Sleep
   Doctor collection + event-log timeline + report generation, adaptive debounce (800ms for
   2 monitors), JSON store round-trip, named-pipe IPC framing, single-instance activation,
-  `GUID_MONITOR_POWER_ON` handling, and the full test harness (94 checks).
+  `GUID_MONITOR_POWER_ON` handling, and the full test harness (100 checks).
+- **Window coverage, verified on a three-monitor box (v0.4):** the keeper's capture now
+  matches the full taskbar-visible window set on a live desktop (28/28, including File
+  Explorer windows that older builds dropped). A Win+Arrow snapped window restores to its
+  exact snapped rect, including when it was re-snapped elsewhere first; a borderless
+  fullscreen RDP (`mstsc`) window was moved to another monitor and restored correctly;
+  seven identically titled Sticky Notes pair with their own saved positions.
+- **Not verifiable on a single-desktop box:** keeping windows that sit on another virtual
+  desktop. The code admits shell-cloaked windows that `IVirtualDesktopManager` places on
+  a non-current desktop; it has not been exercised with a second desktop.
 - **Collapse/restore on this box:** the two panels are always present in this session, so a
   real sleep-collapse was not reproduced here. Collapse detection, global match assignment,
   coordinate scaling, and same-model collision tie-break are covered by unit tests against
@@ -182,5 +193,7 @@ Gigabyte G27Q panels, distinct connector UIDs):
 
 ## Not yet implemented (v2+)
 
-systemsleepdiagnostics detail, virtual-desktop membership, exclude-rule UI, IDD
+systemsleepdiagnostics detail, restoring a window *to* its original virtual desktop
+(windows on other desktops are captured and repositioned, but desktop membership is not
+saved), exclude-rule UI, IDD
 virtual-display collapse prevention, ARM64. See the design doc roadmap.

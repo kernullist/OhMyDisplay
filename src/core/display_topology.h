@@ -37,6 +37,10 @@ namespace omd
     {
         std::vector<MonitorInfo> monitors; // sorted by id for determinism
         std::string signature;             // hash over sorted identities
+        // False while Windows is still re-enumerating displays (wake / hot-plug): some
+        // monitor has no CCD device path, so its identity would fall back to the GDI
+        // name and yield a bogus signature. Such a topology must not be saved.
+        bool complete = true;
 
         int Count() const
         {

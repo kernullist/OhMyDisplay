@@ -190,6 +190,7 @@ namespace omd
     {
         out.monitors.clear();
         out.signature.clear();
+        out.complete = true;
 
         bool ok = false;
         do
@@ -280,6 +281,10 @@ namespace omd
                     m.friendlyName = it->second.friendlyName;
                     m.connectorKey = it->second.connectorKey;
                 }
+                if (m.devicePath.empty())
+                {
+                    out.complete = false;
+                }
 
                 // Base identity: EDID mfg/product + stable device path. The device
                 // path embeds the connector UID, which separates identical models.
@@ -301,6 +306,10 @@ namespace omd
                           return a.id < b.id;
                       });
             out.signature = ComputeSignature(ids);
+            if (out.monitors.empty())
+            {
+                out.complete = false;
+            }
             ok = true;
         } while (false);
         return ok;

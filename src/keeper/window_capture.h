@@ -41,6 +41,13 @@ namespace omd
         std::string title;
         std::string className;
         bool used = false;
+
+        // Current geometry, same model as WindowSnap. Only used to break ties between
+        // otherwise identical candidates (e.g. several Sticky Notes with one title).
+        bool hasGeometry = false;
+        std::string monitorId;
+        double nx = 0.0;
+        double ny = 0.0;
     };
 
     // Normalized rectangle (fractions of a monitor work area). Pure value type so the
@@ -59,11 +66,18 @@ namespace omd
     // Convert normalized fractions back to a screen-space rect on the given work area.
     RECT DenormalizeFromWork(const NormRect& n, const RECT& work);
 
+    // True if the window is one the keeper saves/restores: what the taskbar/alt-tab
+    // shows, including windows on other virtual desktops.
+    bool IsManageableWindow(HWND hwnd);
+
     // Enumerate manageable top-level windows in the current topology and capture them.
     std::vector<WindowSnap> CaptureWindows(const Topology& topo, const KeeperConfig& cfg);
 
     // Enumerate live manageable windows (for restore-time matching).
     std::vector<LiveWindow> EnumerateLiveWindows(const KeeperConfig& cfg);
+
+    // Fill each live window's current monitor + normalized position from the topology.
+    void FillLiveGeometry(std::vector<LiveWindow>& live, const Topology& topo);
 
     // Apply a captured snapshot to a live window, placing it on the resolved monitor.
     // Returns false on UIPI denial or invalid target.

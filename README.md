@@ -14,7 +14,7 @@ Implements the v0 (MVP) scope of [`OhMyDisplay-design.md`](OhMyDisplay-design.md
 ## Status
 
 v0 MVP + initial v1 features, building and running. Single portable exe, no .NET / external
-runtime. Zero `/W4 /permissive-` warnings; 72 test checks pass.
+runtime. Zero `/W4 /permissive-` warnings; 94 test checks pass.
 
 | Component | State |
 |---|---|
@@ -116,8 +116,22 @@ bus and react independently; they do not depend on each other.
   Otherwise the snapshot is left alone (a stray `WM_DISPLAYCHANGE` from a game
   fullscreen or DPI tweak must not yank windows *or* persist the transient layout).
   Use **Save layout now** after rearranging.
+- **Which windows are kept** follows the taskbar rules, not an exe list: visible,
+  uncloaked, non-empty, and either the alt-tab owner-walk winner or `WS_EX_APPWINDOW`
+  (which forces taskbar presence even for tool/owned windows). Tool and no-activate
+  windows without `WS_EX_APPWINDOW` are skipped, as are suspended UWP frames. Windows
+  on another virtual desktop are shell-cloaked; they are kept when
+  `IVirtualDesktopManager` places them on a real, non-current desktop. File Explorer
+  windows are included (older builds excluded `explorer.exe`; that persisted default is
+  migrated away).
+- **Snapped windows**: `rcNormalPosition` holds the pre-snap rect, so an arranged
+  window is captured from its live rect and restored with an explicit move.
+- **Incomplete topologies are not saved**: while Windows is re-enumerating displays a
+  monitor can report no device path, which would hash to a bogus identity. The keeper
+  retries a few times before accepting such a topology, and the adaptive debounce is
+  sized on the last settled monitor count so a 3 -> 1 -> 3 wake dip does not fire early.
 - **Restore matching** is a global highest-score assignment (HWND > title > class > exe)
-  so a weak untitled window cannot steal a better match. Verification is one shared 200ms
+  so a weak untitled window cannot steal a better match. Windows that tie on every field (seven Sticky Notes with one title) are paired by nearest current position on the same monitor, then by capture order, so they no longer shuffle. Verification is one shared 200ms
   settle, then retries only the windows that missed.
 - **Coordinate model**: window rects normalized to the owning monitor work area (survives
   resolution changes); `WINDOWPLACEMENT` workspace<->screen offset handled via the primary
@@ -152,7 +166,7 @@ Gigabyte G27Q panels, distinct connector UIDs):
   topology, EDID + device-path identity, HWND persisted for same-session matching), Sleep
   Doctor collection + event-log timeline + report generation, adaptive debounce (800ms for
   2 monitors), JSON store round-trip, named-pipe IPC framing, single-instance activation,
-  `GUID_MONITOR_POWER_ON` handling, and the full test harness (72 checks).
+  `GUID_MONITOR_POWER_ON` handling, and the full test harness (94 checks).
 - **Collapse/restore on this box:** the two panels are always present in this session, so a
   real sleep-collapse was not reproduced here. Collapse detection, global match assignment,
   coordinate scaling, and same-model collision tie-break are covered by unit tests against

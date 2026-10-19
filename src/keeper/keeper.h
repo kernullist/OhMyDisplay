@@ -8,6 +8,7 @@
 #include "core/display_topology.h"
 #include "core/settings.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -52,10 +53,15 @@ namespace omd
 
     private:
         void EvaluateAndRestore(); // debounce callback (worker thread)
+        int DebounceMonitorCount() const;
 
         Settings& settings_;
         LayoutStore store_;
         std::unique_ptr<Debouncer> debouncer_;
         std::mutex mutex_;
+        // Monitor count of the last settled topology. During wake the live count dips
+        // (3 -> 1 -> 3); sizing the debounce on the dip fires before the rest return.
+        std::atomic<int> lastMonitorCount_{0};
+        int incompleteRetries_ = 0; // worker thread only
     };
 }

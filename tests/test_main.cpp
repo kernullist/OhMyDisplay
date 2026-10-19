@@ -14,6 +14,11 @@
 #include "doctor/powercfg_collector.h"
 #include "doctor/doctor.h"
 #include "doctor/report.h"
+#include "keeper/layout_store.h"
+
+#include <dwmapi.h>
+#include <atomic>
+#include <chrono>
 
 #include <windows.h>
 #include <cstdio>
@@ -209,6 +214,13 @@ static void TestCoordRoundTrip()
     RECT scaled = DenormalizeFromWork(n, work1080);
     CHECK(scaled.left == 1920 + static_cast<LONG>(0.1 * 1920 + 0.5), "x scales to target work area");
     CHECK((scaled.right - scaled.left) == static_cast<LONG>(0.5 * 1920 + 0.5), "width scales proportionally");
+
+    // Snapped/maximized windows hang their invisible border past the work area, so
+    // the normalized offset is negative and must still round-trip exactly.
+    RECT work2{2560, 0, 5120, 1392};
+    RECT snapped{2560 - 7, 0, 2560 + 1287, 1399};
+    RECT snapBack = DenormalizeFromWork(NormalizeToWork(snapped, work2), work2);
+    CHECK(EqualRect(&snapBack, &snapped) != 0, "negative offset (snapped edge) round-trips exactly");
 }
 
 static void TestMatchScore()
@@ -456,11 +468,301 @@ static void TestLiveDoctor()
     }
 }
 
+static void TestDebounceSlidesForwardOnly()
+{
+    std::printf("[debounce never shortens a pending window]\n");
+    std::atomic<int> fired{0};
+    auto start = std::chrono::steady_clock::now();
+    std::atomic<long long> firedAtMs{0};
+    Debouncer d([&]
+    {
+        firedAtMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count());
+        fired.fetch_add(1);
+    });
+    DebounceConfig cfg; // 5 monitors -> 1500ms, 1 monitor -> 550ms
+    d.SetConfig(cfg);
+    d.Start();
+    d.Trigger(5);
+    d.Trigger(1); // a momentary dip to one monitor during wake
+    Sleep(2200);
+    d.Stop();
+    CHECK(fired.load() == 1, "burst fires exactly once");
+    CHECK(firedAtMs.load() >= 1400, "later short trigger did not pull the deadline in");
+}
+
+static void TestSettingsMigration()
+{
+    std::printf("[settings migration]\n");
+    Settings fresh;
+    CHECK(fresh.keeper.excludeExe.empty(), "File Explorer windows are not excluded by default");
+
+    json::Value v1;
+    json::Value::Parse("{\"keeper\":{\"excludeExe\":[\"explorer.exe\"]}}", v1, nullptr);
+    Settings old;
+    old.FromJson(v1);
+    CHECK(old.keeper.excludeExe.empty(), "v1 explorer.exe default is dropped");
+
+    json::Value v2;
+    json::Value::Parse("{\"settingsVersion\":2,\"keeper\":{\"excludeExe\":[\"explorer.exe\"]}}", v2, nullptr);
+    Settings chosen;
+    chosen.FromJson(v2);
+    CHECK(chosen.keeper.excludeExe.size() == 1, "explicit v2 exclusion is kept");
+}
+
+namespace
+{
+    HWND MakeTestWindow(const wchar_t* title, DWORD style, DWORD ex, HWND owner, int x, int y)
+    {
+        static bool registered = false;
+        if (!registered)
+        {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"OmdTestWnd";
+            RegisterClassW(&wc);
+            registered = true;
+        }
+        return CreateWindowExW(ex, L"OmdTestWnd", title, style, x, y, 320, 240, owner, nullptr,
+                               GetModuleHandleW(nullptr), nullptr);
+    }
+
+    void PumpFor(DWORD ms)
+    {
+        DWORD until = GetTickCount() + ms;
+        MSG m;
+        while (GetTickCount() < until)
+        {
+            while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE) != 0)
+            {
+                DispatchMessageW(&m);
+            }
+            Sleep(10);
+        }
+    }
+}
+
+static void TestWindowFilter()
+{
+    std::printf("[window filter: taskbar-visible set]\n");
+    const DWORD ov = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+    HWND hiddenOwner = MakeTestWindow(L"omd-hidden-owner", WS_OVERLAPPEDWINDOW, 0, nullptr, 0, 0);
+    HWND ownedA = MakeTestWindow(L"omd-owned-a", ov, 0, hiddenOwner, 120, 120);
+    HWND ownedB = MakeTestWindow(L"omd-owned-b", ov, 0, hiddenOwner, 140, 140);
+    HWND mainWnd = MakeTestWindow(L"omd-main", ov, 0, nullptr, 160, 160);
+    HWND dialog = MakeTestWindow(L"omd-dialog", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                                 WS_EX_DLGMODALFRAME, mainWnd, 180, 180);
+    HWND ownedApp = MakeTestWindow(L"omd-owned-app", ov, WS_EX_APPWINDOW, mainWnd, 200, 200);
+    HWND toolApp = MakeTestWindow(L"omd-tool-app", ov, WS_EX_TOOLWINDOW | WS_EX_APPWINDOW, nullptr, 220, 220);
+    HWND tool = MakeTestWindow(L"omd-tool", ov, WS_EX_TOOLWINDOW, nullptr, 240, 240);
+    HWND overlay = MakeTestWindow(L"omd-overlay", WS_POPUP | WS_VISIBLE,
+                                  WS_EX_NOACTIVATE | WS_EX_TOPMOST, nullptr, 260, 260);
+    HWND zero = CreateWindowExW(0, L"OmdTestWnd", L"omd-zero", WS_POPUP | WS_VISIBLE, 0, 0, 0, 0,
+                                nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    HWND minimized = MakeTestWindow(L"omd-min", ov, 0, nullptr, 280, 280);
+    ShowWindow(minimized, SW_SHOWMINNOACTIVE);
+    HWND cloaked = MakeTestWindow(L"omd-cloaked", ov, 0, nullptr, 300, 300);
+    BOOL cloak = TRUE;
+    DwmSetWindowAttribute(cloaked, DWMWA_CLOAK, &cloak, sizeof(cloak));
+    PumpFor(300);
+
+    CHECK(IsManageableWindow(ownedA) && IsManageableWindow(ownedB),
+          "windows owned by a hidden owner (WinForms/Delphi) are kept");
+    CHECK(IsManageableWindow(mainWnd), "main window with an open dialog is kept");
+    CHECK(!IsManageableWindow(dialog), "owned dialog is not saved separately");
+    CHECK(IsManageableWindow(ownedApp), "owned WS_EX_APPWINDOW window is kept");
+    CHECK(IsManageableWindow(toolApp), "tool window forced onto the taskbar is kept");
+    CHECK(!IsManageableWindow(tool), "plain tool window is skipped");
+    CHECK(!IsManageableWindow(overlay), "no-activate overlay is skipped");
+    CHECK(!IsManageableWindow(zero), "zero-size helper is skipped");
+    CHECK(IsManageableWindow(minimized), "minimized window is kept");
+    DWORD cloakState = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(cloaked, DWMWA_CLOAKED, &cloakState, sizeof(cloakState))) &&
+        cloakState != 0)
+    {
+        CHECK(!IsManageableWindow(cloaked), "app-cloaked window is skipped");
+    }
+
+    HWND all[] = {ownedA, ownedB, dialog, ownedApp, mainWnd, hiddenOwner, toolApp, tool, overlay, zero,
+                  minimized, cloaked};
+    for (HWND h : all)
+    {
+        DestroyWindow(h);
+    }
+}
+
+static void TestRestoreRoundTrip()
+{
+    std::printf("[restore round-trip on live windows]\n");
+    const DWORD ov = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+    HWND normal = MakeTestWindow(L"omd-rt-normal", ov, 0, nullptr, 100, 110);
+    HWND toolApp = MakeTestWindow(L"omd-rt-toolapp", ov, WS_EX_TOOLWINDOW | WS_EX_APPWINDOW, nullptr, 150, 160);
+    HWND minimized = MakeTestWindow(L"omd-rt-min", ov, 0, nullptr, 200, 210);
+    ShowWindow(minimized, SW_SHOWMINNOACTIVE);
+    PumpFor(200);
+
+    RECT wantNormal{};
+    RECT wantTool{};
+    GetWindowRect(normal, &wantNormal);
+    GetWindowRect(toolApp, &wantTool);
+
+    Topology topo;
+    bool haveTopo = QueryActiveTopology(topo);
+    CHECK(haveTopo, "live topology available");
+    KeeperConfig cfg;
+    StoredTopology stored;
+    DWORD me = GetCurrentProcessId();
+    for (auto& w : CaptureWindows(topo, cfg))
+    {
+        if (w.pid == me)
+        {
+            w.hwnd = nullptr; // force title/class matching, as after a reboot
+            stored.windows.push_back(w);
+        }
+    }
+    CHECK(stored.windows.size() == 3, "all three test windows captured");
+
+    SetWindowPos(normal, nullptr, 700, 500, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(toolApp, nullptr, 650, 450, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    ShowWindow(minimized, SW_SHOWNOACTIVATE);
+    PumpFor(100);
+
+    RestoreEngine engine(cfg);
+    RestoreResult res = engine.Restore(stored, topo);
+    PumpFor(100);
+    RECT gotNormal{};
+    RECT gotTool{};
+    GetWindowRect(normal, &gotNormal);
+    GetWindowRect(toolApp, &gotTool);
+    CHECK(res.restored == 3, "restore reports all three windows");
+    CHECK(EqualRect(&gotNormal, &wantNormal) != 0, "normal window back at its saved rect");
+    CHECK(EqualRect(&gotTool, &wantTool) != 0, "tool+appwindow (screen-coord placement) back at its rect");
+    CHECK(IsIconic(minimized) != 0, "minimized window minimized again");
+
+    DestroyWindow(normal);
+    DestroyWindow(toolApp);
+    DestroyWindow(minimized);
+}
+
+static void TestIdenticalTitleTieBreak()
+{
+    std::printf("[identical-title tie-break]\n");
+    // Seven Sticky Notes share exe/class/title; only position tells them apart.
+    auto note = [](const char* mon, double x, double y)
+    {
+        WindowSnap s;
+        s.exeLeaf = "applicationframehost.exe";
+        s.className = "ApplicationFrameWindow";
+        s.title = "Sticky Notes";
+        s.monitorId = mon;
+        s.nx = x;
+        s.ny = y;
+        return s;
+    };
+    auto liveNote = [](const char* mon, double x, double y)
+    {
+        LiveWindow l;
+        l.exeLeaf = "applicationframehost.exe";
+        l.className = "ApplicationFrameWindow";
+        l.title = "Sticky Notes";
+        l.hasGeometry = true;
+        l.monitorId = mon;
+        l.nx = x;
+        l.ny = y;
+        return l;
+    };
+    std::vector<WindowSnap> snaps = {note("m_a", 0.10, 0.10), note("m_a", 0.60, 0.40), note("m_b", 0.30, 0.30)};
+    // Live order differs from capture order; positions drifted slightly.
+    std::vector<LiveWindow> live = {liveNote("m_b", 0.31, 0.29), liveNote("m_a", 0.12, 0.11),
+                                    liveNote("m_a", 0.58, 0.41)};
+    std::vector<int> a = AssignRestoreMatches(snaps, live);
+    CHECK(a.size() == 3 && a[0] == 1 && a[1] == 2 && a[2] == 0,
+          "identical windows pair with their nearest live counterpart");
+
+    // Same monitor beats a nearer position on another monitor.
+    std::vector<WindowSnap> one = {note("m_a", 0.50, 0.50)};
+    std::vector<LiveWindow> two = {liveNote("m_b", 0.50, 0.50), liveNote("m_a", 0.90, 0.90)};
+    std::vector<int> b = AssignRestoreMatches(one, two);
+    CHECK(b.size() == 1 && b[0] == 1, "same-monitor candidate preferred");
+
+    // Title still outranks geometry.
+    WindowSnap titled = note("m_a", 0.10, 0.10);
+    titled.title = "Groceries";
+    LiveWindow nearUntitled = liveNote("m_a", 0.10, 0.10);
+    LiveWindow farTitled = liveNote("m_b", 0.90, 0.90);
+    farTitled.title = "Groceries";
+    std::vector<int> c = AssignRestoreMatches({titled}, {nearUntitled, farTitled});
+    CHECK(c.size() == 1 && c[0] == 1, "exact title beats geometric closeness");
+
+    // Without geometry the assignment is deterministic: capture order -> enumeration order.
+    std::vector<LiveWindow> blind(3, LiveWindow{});
+    for (auto& l : blind)
+    {
+        l.exeLeaf = "applicationframehost.exe";
+        l.className = "ApplicationFrameWindow";
+        l.title = "Sticky Notes";
+    }
+    std::vector<int> d = AssignRestoreMatches(snaps, blind);
+    CHECK(d.size() == 3 && d[0] == 0 && d[1] == 1 && d[2] == 2, "no geometry -> stable order pairing");
+}
+
+static void TestIdenticalTitleRestoreLive()
+{
+    std::printf("[identical-title restore on live windows]\n");
+    const DWORD ov = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+    HWND w[3] = {MakeTestWindow(L"omd-same-title", ov, 0, nullptr, 100, 100),
+                 MakeTestWindow(L"omd-same-title", ov, 0, nullptr, 500, 140),
+                 MakeTestWindow(L"omd-same-title", ov, 0, nullptr, 900, 180)};
+    PumpFor(200);
+    RECT want[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        GetWindowRect(w[i], &want[i]);
+    }
+    Topology topo;
+    QueryActiveTopology(topo);
+    KeeperConfig cfg;
+    StoredTopology stored;
+    DWORD me = GetCurrentProcessId();
+    for (auto& s : CaptureWindows(topo, cfg))
+    {
+        if (s.pid == me && s.title == "omd-same-title")
+        {
+            s.hwnd = nullptr; // as after a reboot: only exe/class/title + geometry remain
+            stored.windows.push_back(s);
+        }
+    }
+    CHECK(stored.windows.size() == 3, "three same-titled windows captured");
+
+    // Each drifts a little (an app reopening its windows near where they were) and the
+    // z-order is shuffled so enumeration order no longer matches capture order.
+    for (int i = 0; i < 3; ++i)
+    {
+        SetWindowPos(w[i], HWND_TOP, want[i].left + 30, want[i].top + 20, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    PumpFor(100);
+    RestoreEngine engine(cfg);
+    engine.Restore(stored, topo);
+    PumpFor(100);
+    bool allHome = true;
+    for (int i = 0; i < 3; ++i)
+    {
+        RECT got{};
+        GetWindowRect(w[i], &got);
+        allHome = allHome && EqualRect(&got, &want[i]) != 0;
+        DestroyWindow(w[i]);
+    }
+    CHECK(allHome, "each identical window returns to its own saved rect");
+}
+
 int main()
 {
     Logger::Instance().Init(L"tests", LogLevel::Warn);
     std::printf("OhMyDisplay test harness\n========================\n");
     TestDebounce();
+    TestDebounceSlidesForwardOnly();
+    TestSettingsMigration();
     TestJson();
     TestTopologySignature();
     TestSameModelCollision();
@@ -468,6 +770,10 @@ int main()
     TestMatchScore();
     TestMatchAssignment();
     TestCollapseDetection();
+    TestWindowFilter();
+    TestRestoreRoundTrip();
+    TestIdenticalTitleTieBreak();
+    TestIdenticalTitleRestoreLive();
     TestIpcFraming();
     TestRequestsParser();
     TestWakeArmedParser();

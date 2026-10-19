@@ -406,7 +406,7 @@ on DisplayChanged or PowerResume:
     "debounce": { "baseMs": 300, "perMonitorMs": 250, "minMs": 400, "maxMs": 1500 },
     "restoreRetries": 3,
     "elevateForAllWindows": false,
-    "excludeExe": ["explorer.exe"],
+    "excludeExe": [],              // shell surfaces are filtered by window style, not exe
     "excludeTitleRegex": []
   },
   "doctor": { "useWebView2": true, "collectSleepStudy": false },

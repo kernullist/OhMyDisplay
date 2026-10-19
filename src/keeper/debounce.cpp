@@ -79,7 +79,13 @@ namespace omd
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ms = ComputeDebounceMs(cfg_, activeMonitorCount);
-            deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+            auto candidate = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+            // Slide forward only: a burst trigger with a smaller window (fewer monitors
+            // momentarily) must not pull an already-pending deadline earlier.
+            if (!pending_ || candidate > deadline_)
+            {
+                deadline_ = candidate;
+            }
             pending_ = true;
         }
         OMD_LOGI("debounce: trigger monitors=%d window=%lums", activeMonitorCount, ms);

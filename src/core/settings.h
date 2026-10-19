@@ -7,6 +7,11 @@
 
 namespace omd
 {
+    namespace json
+    {
+        class Value;
+    }
+
     struct DebounceConfig
     {
         DWORD baseMs = 300;
@@ -21,7 +26,7 @@ namespace omd
         DebounceConfig debounce;
         int restoreRetries = 3;
         bool elevateForAllWindows = false;
-        std::vector<std::string> excludeExe = {"explorer.exe"}; // matched on file leaf, case-insensitive
+        std::vector<std::string> excludeExe;                    // matched on file leaf, case-insensitive
         std::vector<std::string> excludeTitleSubstr;            // v0 substring match (regex in v1)
     };
 
@@ -46,6 +51,10 @@ namespace omd
         // Load from %LOCALAPPDATA%\OhMyDisplay\settings.json. Missing file is OK
         // (defaults are kept). Returns false only on unexpected error.
         bool Load();
+
+        // Apply a parsed settings.json document over the current values (migrates
+        // older versions). Missing keys keep their current values.
+        bool FromJson(const json::Value& root);
 
         // Save current settings atomically.
         bool Save() const;

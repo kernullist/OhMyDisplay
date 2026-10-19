@@ -4,11 +4,15 @@
 #include "core/paths.h"
 #include "core/json.h"
 #include "core/logger.h"
+#include "core/common.h"
 
 namespace omd
 {
     namespace
     {
+        // 2: excludeExe no longer defaults to explorer.exe.
+        const int kSettingsVersion = 2;
+
         std::vector<std::string> ReadStringArray(const json::Value& arr)
         {
             std::vector<std::string> out;
@@ -43,16 +47,26 @@ namespace omd
 
     bool Settings::Load()
     {
+        json::Value root;
+        if (!Store::Load(FilePath(), root) || !root.IsObject())
+        {
+            // No file yet: keep defaults.
+            return true;
+        }
+        return FromJson(root);
+    }
+
+    bool Settings::FromJson(const json::Value& root)
+    {
         bool ok = true;
         do
         {
-            json::Value root;
-            if (!Store::Load(FilePath(), root) || !root.IsObject())
+            if (!root.IsObject())
             {
-                // No file yet: keep defaults.
                 break;
             }
 
+            int version = root["settingsVersion"].AsInt(1);
             const json::Value* k = root.Find("keeper");
             if (k != nullptr && k->IsObject())
             {
@@ -73,6 +87,13 @@ namespace omd
                 if (ex != nullptr)
                 {
                     keeper.excludeExe = ReadStringArray(*ex);
+                    // v1 persisted the old explorer.exe default, which dropped every File
+                    // Explorer window. Shell surfaces are filtered by window style instead.
+                    if (version < 2 && keeper.excludeExe.size() == 1 &&
+                        IEquals(keeper.excludeExe[0], "explorer.exe"))
+                    {
+                        keeper.excludeExe.clear();
+                    }
                 }
                 const json::Value* et = k->Find("excludeTitleSubstr");
                 if (et != nullptr)
@@ -101,6 +122,7 @@ namespace omd
     bool Settings::Save() const
     {
         json::Value root = json::Value::MakeObject();
+        root.Set("settingsVersion", json::Value(kSettingsVersion));
 
         json::Value k = json::Value::MakeObject();
         k.Set("enabled", json::Value(keeper.enabled));

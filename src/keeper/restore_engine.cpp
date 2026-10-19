@@ -5,6 +5,7 @@
 
 #include <vector>
 #include <algorithm>
+#include <cmath>
 
 namespace omd
 {
@@ -41,6 +42,25 @@ namespace omd
         return score;
     }
 
+    double WindowGeometryDistance(const WindowSnap& snap, const LiveWindow& live)
+    {
+        // Unknown geometry sorts after any known one but keeps candidates eligible.
+        const double kUnknown = 1.0e6;
+        const double kOtherMonitor = 1.0e3;
+        if (!live.hasGeometry)
+        {
+            return kUnknown;
+        }
+        double dx = snap.nx - live.nx;
+        double dy = snap.ny - live.ny;
+        double d = std::sqrt(dx * dx + dy * dy);
+        if (snap.monitorId != live.monitorId)
+        {
+            d += kOtherMonitor;
+        }
+        return d;
+    }
+
     std::vector<int> AssignRestoreMatches(const std::vector<WindowSnap>& snaps,
                                           const std::vector<LiveWindow>& live)
     {
@@ -49,6 +69,7 @@ namespace omd
             int snapIndex;
             int liveIndex;
             int score;
+            double dist;
         };
         std::vector<Pair> pairs;
         for (size_t si = 0; si < snaps.size(); ++si)
@@ -58,7 +79,8 @@ namespace omd
                 int s = WindowMatchScore(snaps[si], live[li]);
                 if (s > 0)
                 {
-                    pairs.push_back(Pair{static_cast<int>(si), static_cast<int>(li), s});
+                    pairs.push_back(Pair{static_cast<int>(si), static_cast<int>(li), s,
+                                         WindowGeometryDistance(snaps[si], live[li])});
                 }
             }
         }
@@ -69,7 +91,17 @@ namespace omd
                       {
                           return a.score > b.score;
                       }
-                      return a.snapIndex < b.snapIndex;
+                      // Equal evidence (same exe/class/title): pair the closest windows
+                      // first, then fall back to capture order vs enumeration (z) order.
+                      if (a.dist != b.dist)
+                      {
+                          return a.dist < b.dist;
+                      }
+                      if (a.snapIndex != b.snapIndex)
+                      {
+                          return a.snapIndex < b.snapIndex;
+                      }
+                      return a.liveIndex < b.liveIndex;
                   });
 
         std::vector<int> assigned(snaps.size(), -1);
@@ -110,6 +142,10 @@ namespace omd
                 lw.exeLeaf = c.exeLeaf;
                 lw.title = c.title;
                 lw.className = c.className;
+                lw.hasGeometry = true;
+                lw.monitorId = c.monitorId;
+                lw.nx = c.nx;
+                lw.ny = c.ny;
                 live.push_back(std::move(lw));
             }
             std::vector<int> match = AssignRestoreMatches(saved, live);
@@ -171,6 +207,21 @@ namespace omd
             }
             return CurrentMonitorGdi(hwnd) == m->gdiName;
         }
+
+        // Enough state to tell "app moved itself back" from "wrong target" next time.
+        void LogGiveUp(HWND hwnd, const WindowSnap& snap, const Topology& topo)
+        {
+            const MonitorInfo* m = topo.FindById(snap.monitorId);
+            RECT r{};
+            GetWindowRect(hwnd, &r);
+            LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            OMD_LOGW("restore: gave up on %s '%s' want=%s got=%s rect=(%ld,%ld,%ld,%ld) "
+                     "iconic=%d zoomed=%d style=%08llx",
+                     snap.exeLeaf.c_str(), snap.title.c_str(),
+                     (m != nullptr) ? m->gdiName.c_str() : "?", CurrentMonitorGdi(hwnd).c_str(),
+                     r.left, r.top, r.right, r.bottom, IsIconic(hwnd) != 0 ? 1 : 0,
+                     IsZoomed(hwnd) != 0 ? 1 : 0, static_cast<unsigned long long>(style));
+        }
     }
 
     RestoreResult RestoreEngine::Restore(const StoredTopology& snap, const Topology& topo)
@@ -179,6 +230,7 @@ namespace omd
         res.total = static_cast<int>(snap.windows.size());
 
         std::vector<LiveWindow> live = EnumerateLiveWindows(cfg_);
+        FillLiveGeometry(live, topo);
 
         struct Pending
         {
@@ -243,7 +295,7 @@ namespace omd
                 res.skipped += static_cast<int>(failed.size());
                 for (const auto& p : failed)
                 {
-                    OMD_LOGW("restore: gave up on %s '%s'", p.snap->exeLeaf.c_str(), p.snap->title.c_str());
+                    LogGiveUp(p.hwnd, *p.snap, topo);
                 }
                 break;
             }

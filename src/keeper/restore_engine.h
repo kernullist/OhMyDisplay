@@ -17,6 +17,10 @@ namespace omd
 
     // Global greedy assignment: pair each saved window with at most one live window,
     // highest score first. Returns live-index per snap, or -1 if unmatched.
+    // Tie-break distance between a saved window and a live candidate: normalized
+    // position delta, plus a large penalty for a different monitor.
+    double WindowGeometryDistance(const WindowSnap& snap, const LiveWindow& live);
+
     std::vector<int> AssignRestoreMatches(const std::vector<WindowSnap>& snaps,
                                           const std::vector<LiveWindow>& live);
 

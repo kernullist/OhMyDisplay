@@ -6,6 +6,7 @@
 #include "core/logger.h"
 
 #include <windows.h>
+#include <algorithm>
 
 namespace omd
 {
@@ -47,14 +48,15 @@ namespace omd
         {
             return;
         }
-        // Active monitor count drives the adaptive window; cheap to read here.
-        int count = GetSystemMetrics(SM_CMONITORS);
-        if (count < 1)
-        {
-            count = 1;
-        }
         debouncer_->SetConfig(settings_.keeper.debounce);
-        debouncer_->Trigger(count);
+        debouncer_->Trigger(DebounceMonitorCount());
+    }
+
+    int Keeper::DebounceMonitorCount() const
+    {
+        // Active monitor count drives the adaptive window; cheap to read here.
+        int count = std::max(GetSystemMetrics(SM_CMONITORS), lastMonitorCount_.load());
+        return std::max(count, 1);
     }
 
     Topology Keeper::CurrentResolvedTopology()
@@ -158,6 +160,24 @@ namespace omd
         {
             return;
         }
+        if (!topo.complete)
+        {
+            // Saving now would persist a bogus signature with the collapsed layout, so
+            // wait for Windows to finish enumerating. A display that never reports a
+            // device path (some VMs/virtual displays) falls through after the retries.
+            const int kMaxIncompleteRetries = 5;
+            if (incompleteRetries_ < kMaxIncompleteRetries && debouncer_)
+            {
+                ++incompleteRetries_;
+                OMD_LOGW("keeper: topology incomplete (%d monitors), retry %d",
+                         topo.Count(), incompleteRetries_);
+                debouncer_->Trigger(DebounceMonitorCount());
+                return;
+            }
+            OMD_LOGW("keeper: topology still incomplete after retries, using it as-is");
+        }
+        incompleteRetries_ = 0;
+        lastMonitorCount_.store(topo.Count());
 
         bool collision = false;
         StoredTopology snapCopy;

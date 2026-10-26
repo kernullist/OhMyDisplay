@@ -13,7 +13,7 @@ Implements the v0 (MVP) scope of [`OhMyDisplay-design.md`](OhMyDisplay-design.md
 
 ## Status
 
-v0 MVP + initial v1 features, building and running (current release: v0.4.0). Single
+v0 MVP + initial v1 features, building and running (current release: v0.4.1). Single
 portable exe, no .NET / external runtime. Zero `/W4 /permissive-` warnings; 104 test checks
 pass.
 
@@ -53,7 +53,7 @@ Artifacts land in `build\`:
 
 ### Releases
 
-Pushing a `v*` tag (e.g. `git tag v0.4.0 && git push origin v0.4.0`) runs the release
+Pushing a `v*` tag (e.g. `git tag v0.4.1 && git push origin v0.4.1`) runs the release
 workflow: it builds Release, runs the tests, and publishes a GitHub Release with the two
 exes plus a zipped bundle. Release binaries are currently unsigned (Authenticode signing is
 a planned hardening item, so SmartScreen will warn on first run).
@@ -174,13 +174,17 @@ Gigabyte G27Q panels, distinct connector UIDs):
   topology, EDID + device-path identity, HWND persisted for same-session matching), Sleep
   Doctor collection + event-log timeline + report generation, adaptive debounce (800ms for
   2 monitors), JSON store round-trip, named-pipe IPC framing, single-instance activation,
-  `GUID_MONITOR_POWER_ON` handling, and the full test harness (100 checks).
+  `GUID_MONITOR_POWER_ON` handling, and the full test harness (104 checks).
 - **Window coverage, verified on a three-monitor box (v0.4):** the keeper's capture now
   matches the full taskbar-visible window set on a live desktop (28/28, including File
   Explorer windows that older builds dropped). A Win+Arrow snapped window restores to its
   exact snapped rect, including when it was re-snapped elsewhere first; a borderless
   fullscreen RDP (`mstsc`) window was moved to another monitor and restored correctly;
   seven identically titled Sticky Notes pair with their own saved positions.
+- **Snapshot freshness, verified on the three-monitor box (v0.4.1):** a real display-off
+  re-saved the layout once (36 windows, all 8 File Explorer windows and an Electron app
+  that the week-old snapshot had missed). Restore after a genuine long-sleep collapse with
+  this build has not been observed yet.
 - **Not verifiable on a single-desktop box:** keeping windows that sit on another virtual
   desktop. The code admits shell-cloaked windows that `IVirtualDesktopManager` places on
   a non-current desktop; it has not been exercised with a second desktop.

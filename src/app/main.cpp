@@ -282,7 +282,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     }
 
     Logger::Instance().Init(L"main", LogLevel::Info);
-    OMD_LOGI("OhMyDisplay starting (v0.4)");
+    OMD_LOGI("OhMyDisplay starting (v0.4.1)");
 
     App app;
     app.hInst = hInstance;

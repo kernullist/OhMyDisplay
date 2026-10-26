@@ -319,12 +319,25 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     });
     app.bus.Subscribe(CoreEvent::PowerResume, [&app](const EventArgs&)
     {
+        app.keeper->OnDisplayOn();
         app.keeper->OnTopologyEvent();
     });
     app.bus.Subscribe(CoreEvent::DisplayStateOn, [&app](const EventArgs&)
     {
+        app.keeper->OnDisplayOn();
         app.keeper->OnTopologyEvent();
     });
+
+    // Displays going dark: snapshot the layout before a wake can collapse it.
+    auto preSleep = [&app](const EventArgs&)
+    {
+        if (app.keeper->OnDisplayOff())
+        {
+            app.jobs.Run([&app] { app.keeper->CapturePreSleep(); });
+        }
+    };
+    app.bus.Subscribe(CoreEvent::DisplayStateOff, preSleep);
+    app.bus.Subscribe(CoreEvent::PowerSuspend, preSleep);
 
     // WM_DISPLAYCHANGE on the hub -> bus.
     app.hub.AddHandler(WM_DISPLAYCHANGE, [&app](HWND, UINT, WPARAM, LPARAM, LRESULT& result) -> bool

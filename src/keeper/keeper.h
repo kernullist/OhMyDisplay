@@ -31,6 +31,17 @@ namespace omd
         // From the UI thread on DisplayChanged / PowerResume: starts adaptive debounce.
         void OnTopologyEvent();
 
+        // From the UI thread on DisplayStateOff / PowerSuspend. Returns true on the
+        // first off signal of a cycle (both power GUIDs fire); the caller then runs
+        // CapturePreSleep off the UI thread.
+        bool OnDisplayOff();
+        // From the UI thread on DisplayStateOn / PowerResume.
+        void OnDisplayOn();
+
+        // Replace the current topology's snapshot with the layout the user had right
+        // before the displays went dark. Worker thread.
+        void CapturePreSleep();
+
         // Hotkey / menu actions.
         void SaveNow();
         void RestoreNow();
@@ -63,5 +74,9 @@ namespace omd
         // (3 -> 1 -> 3); sizing the debounce on the dip fires before the rest return.
         std::atomic<int> lastMonitorCount_{0};
         int incompleteRetries_ = 0; // worker thread only
+        std::atomic<bool> displayOff_{false};
+        // Topology whose snapshot was taken at the last display-off and not yet
+        // evaluated after wake. Guarded by mutex_.
+        std::string preSleepSignature_;
     };
 }

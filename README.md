@@ -14,7 +14,7 @@ Implements the v0 (MVP) scope of [`OhMyDisplay-design.md`](OhMyDisplay-design.md
 ## Status
 
 v0 MVP + initial v1 features, building and running (current release: v0.4.0). Single
-portable exe, no .NET / external runtime. Zero `/W4 /permissive-` warnings; 100 test checks
+portable exe, no .NET / external runtime. Zero `/W4 /permissive-` warnings; 104 test checks
 pass.
 
 | Component | State |
@@ -70,12 +70,13 @@ Run `OhMyDisplay.exe`. It lives in the tray. Right-click the icon for:
 - **Monitor labels** - name each monitor; required to disambiguate identical models
 - **Detect ghost monitors** - lists phantom display entries the system still remembers
 
-Layouts are saved automatically on first sight of a topology (and whenever you click
-**Save layout now**). Restore runs only when a known topology looks **collapsed** (a
-substantial share of windows have fled to the wrong monitor), not on every
-`WM_DISPLAYCHANGE`. Stable-topology events leave the last good snapshot alone so a
-game going fullscreen cannot overwrite it. A second launch of the exe activates the
-already-running copy.
+Layouts are saved automatically on first sight of a topology, right before the displays
+turn off or the PC sleeps, and whenever you click **Save layout now**. Restore runs only
+when a known topology looks **collapsed** (a substantial share of windows have fled to the
+wrong monitor, or any window when waking from a pre-sleep snapshot), not on every
+`WM_DISPLAYCHANGE`. Stable-topology events only add windows opened since the snapshot
+and leave existing entries alone, so a game going fullscreen cannot overwrite them. A
+second launch of the exe activates the already-running copy.
 
 Data lives in `%LOCALAPPDATA%\OhMyDisplay\` (`layouts.json`, `settings.json`, `logs\`,
 `report.html`). Nothing is sent anywhere.
@@ -115,9 +116,14 @@ bus and react independently; they do not depend on each other.
   monitors stop coming back.
 - **Collapse-aware restore**: after debounce, current window monitors are compared to the
   snapshot. Restore only if at least half the matched windows sit on the wrong display.
-  Otherwise the snapshot is left alone (a stray `WM_DISPLAYCHANGE` from a game
-  fullscreen or DPI tweak must not yank windows *or* persist the transient layout).
-  Use **Save layout now** after rearranging.
+  Otherwise existing entries are left alone (a stray `WM_DISPLAYCHANGE` from a game
+  fullscreen or DPI tweak must not yank windows *or* persist the transient layout);
+  windows with no entry yet are appended so newly opened apps become restorable.
+- **Pre-sleep snapshot**: on display-off (or suspend while the displays are on) the
+  current topology's snapshot is replaced with the live layout, which also prunes closed
+  windows. The first evaluation of that topology after wake restores even a partial
+  collapse, since nothing but the wake could have moved those windows. Use **Save layout
+  now** to pin a rearrangement immediately.
 - **Which windows are kept** follows the taskbar rules, not an exe list: visible,
   uncloaked, non-empty, and either the alt-tab owner-walk winner or `WS_EX_APPWINDOW`
   (which forces taskbar presence even for tool/owned windows). Tool and no-activate

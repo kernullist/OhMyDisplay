@@ -337,6 +337,46 @@ static void TestCollapseDetection()
 
     std::vector<WindowSnap> empty;
     CHECK(!LayoutLooksCollapsed(saved, empty), "empty current capture is not a collapse");
+
+    int matched = 0;
+    CHECK(CountMisplacedWindows(saved, oneMoved, matched) == 1 && matched == 4,
+          "partial collapse counts the single misplaced window");
+}
+
+static void TestUnmatchedWindows()
+{
+    std::printf("[unmatched windows]\n");
+    WindowSnap explorer;
+    explorer.exeLeaf = "explorer.exe";
+    explorer.className = "CabinetWClass";
+    explorer.title = "Docs - File Explorer";
+    explorer.monitorId = "m_left";
+    std::vector<WindowSnap> saved = {explorer};
+
+    // Saved before more Explorer windows and a new app were opened; the one saved
+    // window has since navigated elsewhere (title changed).
+    std::vector<WindowSnap> current;
+    WindowSnap e1 = explorer;
+    e1.title = "Downloads - File Explorer";
+    WindowSnap e2 = explorer;
+    e2.title = "Test - File Explorer";
+    e2.monitorId = "m_right";
+    WindowSnap grok;
+    grok.exeLeaf = "grok bot.exe";
+    grok.className = "Chrome_WidgetWin_1";
+    grok.title = "Grok Bot";
+    grok.monitorId = "m_right";
+    current = {e1, e2, grok};
+
+    std::vector<WindowSnap> added = UnmatchedWindows(saved, current);
+    CHECK(added.size() == 2, "one Explorer window pairs with the saved entry, two are new");
+    bool hasGrok = false;
+    for (const auto& w : added)
+    {
+        hasGrok = hasGrok || w.exeLeaf == "grok bot.exe";
+    }
+    CHECK(hasGrok, "a never-saved app is reported as new");
+    CHECK(UnmatchedWindows(current, current).empty(), "identical capture adds nothing");
 }
 
 static void TestIpcFraming()
@@ -770,6 +810,7 @@ int main()
     TestMatchScore();
     TestMatchAssignment();
     TestCollapseDetection();
+    TestUnmatchedWindows();
     TestWindowFilter();
     TestRestoreRoundTrip();
     TestIdenticalTitleTieBreak();

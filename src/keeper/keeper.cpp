@@ -52,6 +52,45 @@ namespace omd
         debouncer_->Trigger(DebounceMonitorCount());
     }
 
+    bool Keeper::OnDisplayOff()
+    {
+        // A suspend after the displays already went dark must not re-capture: the
+        // topology may have collapsed in the meantime.
+        return settings_.keeper.enabled && !displayOff_.exchange(true);
+    }
+
+    void Keeper::OnDisplayOn()
+    {
+        displayOff_.store(false);
+    }
+
+    void Keeper::CapturePreSleep()
+    {
+        Topology topo;
+        if (!QueryActiveTopology(topo) || !topo.complete)
+        {
+            OMD_LOGW("keeper: pre-sleep capture skipped (topology unavailable)");
+            return;
+        }
+        size_t count = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ResolveIdentities(topo, store_.Labels());
+            std::vector<WindowSnap> wins = CaptureWindows(topo, settings_.keeper);
+            if (wins.empty())
+            {
+                return;
+            }
+            // Full replace: this is the layout the user was looking at, and it drops
+            // entries for windows that have since closed.
+            count = wins.size();
+            store_.Upsert(topo, wins);
+            store_.Save();
+            preSleepSignature_ = topo.signature;
+        }
+        OMD_LOGI("keeper: pre-sleep snapshot saved (%zu windows)", count);
+    }
+
     int Keeper::DebounceMonitorCount() const
     {
         // Active monitor count drives the adaptive window; cheap to read here.
@@ -183,17 +222,49 @@ namespace omd
         StoredTopology snapCopy;
         bool found = false;
         bool autoSaved = false;
+        bool needRestore = false;
         size_t savedCount = 0;
+        size_t addedCount = 0;
         std::vector<WindowSnap> current;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             collision = ResolveIdentities(topo, store_.Labels());
             current = CaptureWindows(topo, settings_.keeper);
-            const StoredTopology* st = store_.FindBySignature(topo.signature);
+            StoredTopology* st = store_.FindBySignature(topo.signature);
             if (st != nullptr)
             {
                 snapCopy = *st;
                 found = true;
+
+                int matched = 0;
+                int misplaced = CountMisplacedWindows(st->windows, current, matched);
+                if (preSleepSignature_ == topo.signature)
+                {
+                    // The snapshot is the layout from right before the displays went
+                    // dark, so any window on another monitor was moved by the wake,
+                    // not by the user. Restore even a partial collapse.
+                    preSleepSignature_.clear();
+                    needRestore = misplaced > 0;
+                }
+                else
+                {
+                    needRestore = LayoutLooksCollapsed(st->windows, current);
+                }
+
+                if (!needRestore && topo.complete)
+                {
+                    // Windows opened since the snapshot have no entry and would never
+                    // be restored. Add them; existing entries stay untouched so a
+                    // transient (game fullscreen, DPI change) cannot overwrite them.
+                    std::vector<WindowSnap> added = UnmatchedWindows(st->windows, current);
+                    if (!added.empty())
+                    {
+                        addedCount = added.size();
+                        st->windows.insert(st->windows.end(), added.begin(), added.end());
+                        st->lastSeenUtc = NowUtcIso();
+                        store_.Save();
+                    }
+                }
             }
             else if (!current.empty())
             {
@@ -225,7 +296,7 @@ namespace omd
             return;
         }
 
-        if (LayoutLooksCollapsed(snapCopy.windows, current))
+        if (needRestore)
         {
             RestoreEngine engine(settings_.keeper);
             RestoreResult res = engine.Restore(snapCopy, topo);
@@ -239,8 +310,9 @@ namespace omd
             return;
         }
 
-        // Known topology, not collapsed: leave the last good snapshot alone.
-        // Refreshing here would persist game-fullscreen / DPI transients.
-        OMD_LOGI("keeper: topology stable, snapshot kept (%zu live windows)", current.size());
+        // Known topology, not collapsed: keep existing entries (refreshing them here
+        // would persist game-fullscreen / DPI transients), only new windows were added.
+        OMD_LOGI("keeper: topology stable, snapshot kept (%zu live windows, %zu new added)",
+                 current.size(), addedCount);
     }
 }

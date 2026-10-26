@@ -30,6 +30,15 @@ namespace omd
     bool LayoutLooksCollapsed(const std::vector<WindowSnap>& saved,
                               const std::vector<WindowSnap>& current);
 
+    // Number of matched saved windows whose current monitor differs from the saved
+    // one. outMatched receives how many saved windows found a live counterpart.
+    int CountMisplacedWindows(const std::vector<WindowSnap>& saved,
+                              const std::vector<WindowSnap>& current, int& outMatched);
+
+    // Current windows no saved entry matches (opened after the snapshot was taken).
+    std::vector<WindowSnap> UnmatchedWindows(const std::vector<WindowSnap>& saved,
+                                             const std::vector<WindowSnap>& current);
+
     struct RestoreResult
     {
         int total = 0;

@@ -122,16 +122,11 @@ namespace omd
         return assigned;
     }
 
-    bool LayoutLooksCollapsed(const std::vector<WindowSnap>& saved,
-                              const std::vector<WindowSnap>& current)
+    namespace
     {
-        bool collapsed = false;
-        do
+        // A capture viewed as live candidates, so captures can be matched to snapshots.
+        std::vector<LiveWindow> CaptureAsLive(const std::vector<WindowSnap>& current)
         {
-            if (saved.empty() || current.empty())
-            {
-                break;
-            }
             std::vector<LiveWindow> live;
             live.reserve(current.size());
             for (const auto& c : current)
@@ -148,32 +143,64 @@ namespace omd
                 lw.ny = c.ny;
                 live.push_back(std::move(lw));
             }
-            std::vector<int> match = AssignRestoreMatches(saved, live);
-            int matched = 0;
-            int wrong = 0;
-            for (size_t i = 0; i < saved.size(); ++i)
+            return live;
+        }
+    }
+
+    int CountMisplacedWindows(const std::vector<WindowSnap>& saved,
+                              const std::vector<WindowSnap>& current, int& outMatched)
+    {
+        outMatched = 0;
+        int wrong = 0;
+        std::vector<int> match = AssignRestoreMatches(saved, CaptureAsLive(current));
+        for (size_t i = 0; i < saved.size(); ++i)
+        {
+            int li = match[i];
+            if (li < 0)
             {
-                int li = match[i];
-                if (li < 0)
-                {
-                    continue;
-                }
-                ++matched;
-                const std::string& want = saved[i].monitorId;
-                const std::string& got = current[static_cast<size_t>(li)].monitorId;
-                if (!want.empty() && !got.empty() && want != got)
-                {
-                    ++wrong;
-                }
+                continue;
             }
-            if (matched <= 0)
+            ++outMatched;
+            const std::string& want = saved[i].monitorId;
+            const std::string& got = current[static_cast<size_t>(li)].monitorId;
+            if (!want.empty() && !got.empty() && want != got)
             {
-                break;
+                ++wrong;
             }
-            // At least half the matched windows fled to a different monitor.
-            collapsed = (wrong * 2 >= matched);
-        } while (false);
-        return collapsed;
+        }
+        return wrong;
+    }
+
+    bool LayoutLooksCollapsed(const std::vector<WindowSnap>& saved,
+                              const std::vector<WindowSnap>& current)
+    {
+        int matched = 0;
+        int wrong = CountMisplacedWindows(saved, current, matched);
+        // At least half the matched windows fled to a different monitor.
+        return matched > 0 && wrong * 2 >= matched;
+    }
+
+    std::vector<WindowSnap> UnmatchedWindows(const std::vector<WindowSnap>& saved,
+                                             const std::vector<WindowSnap>& current)
+    {
+        std::vector<int> match = AssignRestoreMatches(saved, CaptureAsLive(current));
+        std::vector<char> taken(current.size(), 0);
+        for (int li : match)
+        {
+            if (li >= 0)
+            {
+                taken[static_cast<size_t>(li)] = 1;
+            }
+        }
+        std::vector<WindowSnap> out;
+        for (size_t i = 0; i < current.size(); ++i)
+        {
+            if (taken[i] == 0)
+            {
+                out.push_back(current[i]);
+            }
+        }
+        return out;
     }
 
     namespace
